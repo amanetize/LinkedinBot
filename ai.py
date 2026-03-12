@@ -48,7 +48,26 @@ def _tavily_search_with_answer(
         kwargs = dict(query=query, topic=topic, max_results=max_results, include_answer=include_answer)
         if time_range:
             kwargs["time_range"] = time_range
+
         response = tc.search(**kwargs)
+
+    except TypeError as e:
+        # Some Tavily versions may not support the time_range argument, so retry without it.
+        if "time_range" in str(e):
+            try:
+                kwargs.pop("time_range", None)
+                response = tc.search(**kwargs)
+            except Exception as e2:
+                print(f"[ai] Tavily search retry without time_range failed: {e2}")
+                return {"answer": "", "search_context": ""}
+        else:
+            print(f"[ai] Tavily search TypeError: {e}")
+            return {"answer": "", "search_context": ""}
+    except Exception as e:
+        print(f"[ai] Tavily search error: {e}")
+        return {"answer": "", "search_context": ""}
+
+    try:
         results = response.get("results") or []
         answer = (response.get("answer") or "").strip() if include_answer else ""
 
@@ -62,7 +81,7 @@ def _tavily_search_with_answer(
         search_context = "\n\n".join(lines) if lines else ""
         return {"answer": answer, "search_context": search_context}
     except Exception as e:
-        print(f"[ai] Tavily search error: {e}")
+        print(f"[ai] Tavily search parse error: {e}")
         return {"answer": "", "search_context": ""}
 
 

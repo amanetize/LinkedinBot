@@ -167,15 +167,15 @@ All data is stored in MongoDB database `linkedin_bot`. See [COLLECTIONS.md](COLL
 - **Target logs**: raw post, URL, author, why selected, Telegram message, all comment versions, each action (approve/skip/post/drop), final comment
 - **News logs**: raw Tavily search, all drafts (fetch/rephrase), Telegram messages, actions, final posted content
 
-## 9. Free Deployment on Koyeb (24/7, No CC Required)
+## 9. Netlify Webhook Deployment (serverless)
 
-**Koyeb is ideal for this bot**: free tier includes 2 services, 24/7 uptime, no credit card, and perfect for long-running Telegram bots.
+Netlify Functions can host a limited webhook entry point for Telegram commands. This is not a full 24/7 scanning solution; for that use a Docker VM host (Render, Fly, Heroku, etc.).
 
-### Quick Start: Koyeb Deployment
+### Quick Start: Netlify Webhook
 
 **Prerequisites:**
 - GitHub account with this repo pushed
-- Koyeb account (free, no CC): [koyeb.com](https://www.koyeb.com)
+- Netlify account: [netlify.com](https://www.netlify.com)
 - MongoDB Atlas (free tier M0 cluster): [mongodb.com/cloud/atlas](https://www.mongodb.com/cloud/atlas)
 
 **Steps:**
@@ -191,96 +191,30 @@ All data is stored in MongoDB database `linkedin_bot`. See [COLLECTIONS.md](COLL
 # mongodb+srv://username:password@cluster.mongodb.net/linkedin_bot?retryWrites=true&w=majority
 ```
 
-#### 2. Deploy to Koyeb
+#### 2. Deploy as Netlify Function (Webhook)
 
-1. **Sign up** at [koyeb.com](https://www.koyeb.com) (GitHub login works)
-2. **Create a new app**:
-   - GitHub → select your repo → main branch
-   - Runtime: Python
-   - Launch command: `python3 bot.py`
-   - Name your service (e.g., `linkedin-bot`)
-   - Keep instance size: Free (512MB RAM)
-3. **Add environment variables** before deploying:
-   - Click "Environment" tab (or during creation, scroll to "Other Options")
-   - Add all variables from `.env`:
+Netlify Functions are designed for short-running HTTP requests and are not suitable for persistent browser scanning. This section covers the webhook entrypoint and command handling you can run on Netlify.
 
-```
-LI_EMAIL=your_linkedin_email@gmail.com
-LI_PASSWORD=your_linkedin_password
-TELEGRAM_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_CHAT_ID=987654321
-GROQ_API_KEY=gsk_xxxxxxxxxxxxx
-TAVILY_API_KEY=tvly-xxxxxxxxxxxxx
-MONGO_URI=mongodb+srv://username:password@cluster.mongodb.net/linkedin_bot?retryWrites=true&w=majority
-```
-
-4. **Deploy**: Click "Create" → Koyeb builds and deploys automatically
-5. **Check logs**: Koyeb dashboard → your service → Logs → should see bot starting
+1. Sign up at https://www.netlify.com and connect your GitHub repo.
+2. Ensure your repo contains:
+   - netlify.toml
+   - netlify/functions/telegram_webhook.py
+3. Configure environment variables in Netlify site settings with your bot keys.
+4. Deploy and note function URL: https://YOUR_NETLIFY_SITE.netlify.app/.netlify/functions/telegram_webhook
+5. Set Telegram webhook:
+   curl -X POST "https://api.telegram.org/bot<TELEGRAM_TOKEN>/setWebhook?url=https://YOUR_NETLIFY_SITE.netlify.app/.netlify/functions/telegram_webhook"
 
 #### 3. Test It
 
-Send any message on Telegram to your bot:
-- It should respond (if bot is running on Koyeb)
-- Send `/start_cron` and approve a target
-- Watch it post in the background
+Send /help or /post_news to the bot. /start_cron and /stop are not supported in Netlify mode (requires long-lived background process).
 
-#### 4. Keep Running
+#### 4. Recommended full-host deployment
 
-When your Koyeb free instance redeploys or restarts, the bot automatically reconnects to Telegram. **No manual restart needed**—just set and forget.
-
-### Koyeb Free Tier Limits
-
-| Resource | Free Tier | Need More? |
-|----------|-----------|------------|
-| Services | 2 | Paid starts $3/service/month |
-| Compute | 2 vCPU, 4GB RAM total | Enough for this bot |
-| Data transfer | 100GB/month | Plenty for Telegram + LinkedIn |
-| Uptime | 24/7 SLA | No sleep, no suspend |
-| Builds | Unlimited | Auto-deploy on push |
-| Credit card | **Not required** | Free tier doesn't charge |
-
-### Koyeb vs. Alternatives
-
-| Hosting | Free Tier | No CC | 24/7 Uptime | Setup Complexity |
-|---------|-----------|-------|-------------|------------------|
-| **Koyeb** | ✅ 2 services | ✅ Yes | ✅ Yes | ⭐ Very easy |
-| Railway | ✅ $5/mo credit | ⚠️ Needs card after | ✅ Yes | ⭐ Easy |
-| Render | ✅ Limited | ✅ Yes | ⚠️ 15min timeout on web | ⭐⭐ Medium |
-| Oracle Cloud | ✅ Always Free | ⚠️ Billing info | ✅ Yes | ⭐⭐⭐ Hard |
-
-### Troubleshooting Koyeb
-
-**Bot not responding on Telegram:**
-- Check Koyeb logs: Service → Logs
-- Confirm `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` are set correctly
-- Try restart: Service → Restart
-
-**MongoDB connection fails:**
-- Verify `MONGO_URI` in Koyeb environment variables
-- In MongoDB Atlas: Network Access → check IP is whitelisted (0.0.0.0/0 for testing)
-- Test locally first to confirm MONGO_URI is correct
-
-**Playwright fails (LinkedIn login errors):**
-- Koyeb runs headless Chromium fine; rare issue
-- If stuck: wait 5 min, then restart service
-
-**Out of free tier resources:**
-- Koyeb: 2 services free; if you need more, upgrade to paid or create a new free account
-- Bot itself uses ~300MB RAM; well within free tier
-
-### After Deployment
-
-Once on Koyeb:
-- You never need to keep your laptop running
-- `/start_cron` and `/post_news` work anywhere, anytime
-- All comments post automatically with delays
-- MongoDB logs everything in `activity_logs` collection
-
-**That's it!** 🚀 Your bot is now live 24/7 on Koyeb.
+For full feed-scanning and LinkedIn posting, deploy on a VM/container host (Render, Fly.io, Heroku, etc.).
 
 ## 10. Running Locally
 
-For testing before deploying to Koyeb:
+For testing before deploying to your production host:
 
 ```bash
 # 1. Activate venv

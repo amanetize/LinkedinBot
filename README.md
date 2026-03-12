@@ -9,8 +9,8 @@ Automated LinkedIn engagement bot controlled via Telegram. Scan qualified posts,
 ✨ **Comment Customization** — Regenerate, write custom comment, or rephrase with your instruction
 ✨ **News Generation** — Top-5 AI news weekly with Tavily search + AI drafting
 ✨ **Activity Logging** — Full audit trail: every scrape, draft, action stored in MongoDB
-✨ **24/7 Uptime** — Deploy to Koyeb (free tier) and run forever
-✨ **No CC Required** — Completely free hosting + free API tiers
+✨ **Netlify-friendly webhook** — command responders in `netlify/functions/telegram_webhook.py`
+✨ **Recommended for 24/7** — deploy on VM/container host (Render, Fly, Heroku) for Playwright scanning
 
 ## Quick Start
 
@@ -60,15 +60,15 @@ The bot will start listening. Test it:
 - Approve a target
 - Watch it draft and post comments
 
-### 4. Deploy to Koyeb (Free, 24/7)
+### 4. Deploy to Netlify (Webhook only)
 
-See [SETUP.md § 9](SETUP.md#9-free-deployment-on-koyeb-24-7-no-cc-required) for full deployment steps.
+Netlify functions can host webhook commands but cannot run long-lived Playwright scanning. For full 24/7 automation, deploy to a VM/container host (Render, Fly.io, Heroku, etc.).
 
-**TL;DR:**
-1. Sign up: [koyeb.com](https://koyeb.com)
-2. Connect GitHub repo
-3. Set environment variables in Koyeb dashboard
-4. Deploy → bot runs 24/7
+1. Add `netlify.toml` and `netlify/functions/telegram_webhook.py`
+2. Set `TELEGRAM_TOKEN`, `GROQ_API_KEY`, `TAVILY_API_KEY`, `MONGO_URI`, `LI_EMAIL`, `LI_PASSWORD` in Netlify site settings
+3. Set Telegram webhook URL:
+   `https://<your-site>.netlify.app/.netlify/functions/telegram_webhook`
+4. Use commands `/help`, `/post_news`, etc. (limited serverless mode)
 
 ## Commands
 
@@ -134,7 +134,7 @@ li_cookies.json     LinkedIn session (auto-refreshed)
 | Groq | 30 req/min | [console.groq.com](https://console.groq.com/keys) |
 | Tavily | 100 searches/month | [app.tavily.com](https://app.tavily.com) |
 | MongoDB | M0 (512MB) | [mongodb.com/cloud/atlas](https://www.mongodb.com/cloud/atlas) |
-| Koyeb | 2 services + 24/7 | [koyeb.com](https://koyeb.com) |
+| Netlify Functions | serverless edge | [netlify.com](https://www.netlify.com) |
 
 **Total cost: $0** (unless you exceed free tier quotas)
 
@@ -151,7 +151,7 @@ See [COLLECTIONS.md](COLLECTIONS.md) for full MongoDB schema:
 | Issue | Solution |
 |-------|----------|
 | Bot not responding | Check `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` |
-| MongoDB connection fails | Verify `MONGO_URI` and whitelist Koyeb IP (0.0.0.0/0) |
+| MongoDB connection fails | Verify `MONGO_URI` and whitelist your hosting IP(s) (0.0.0.0/0 for testing) |
 | LinkedIn login fails | Disable 2FA on LinkedIn account |
 | "Can't parse entities" | All messages use plain text; this error shouldn't occur |
 
@@ -202,4 +202,4 @@ Submit issues or PRs to improve the bot.
 
 **Questions?** See [SETUP.md](SETUP.md) for detailed setup and deployment instructions.
 
-**Deploy now**: [Koyeb Quick Start](SETUP.md#9-free-deployment-on-koyeb-24-7-no-cc-required)
+**Deploy now**: [Netlify Webhook Quick Start](SETUP.md#9-netlify-webhook-deployment-serverless)

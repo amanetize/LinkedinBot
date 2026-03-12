@@ -6,13 +6,9 @@ Commands:
   /post_news        — Generate an AI news post for LinkedIn
   /stop             — Cancel everything
 
-KOYEB FIX: Runs a tiny aiohttp health-check server on $PORT alongside
-the Telegram polling loop. Koyeb requires a web process that responds
-on PORT — without this the service gets killed immediately.
 """
 
-import asyncio, os, random, uuid, threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import asyncio, os, random, uuid
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -29,23 +25,6 @@ from db import (
 from dotenv import load_dotenv
 
 load_dotenv()
-
-
-# ── Health-check server (required by Koyeb) ───────────────────────────────────
-class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def log_message(self, *args):
-        pass  # suppress noisy access logs
-
-def _start_health_server():
-    port = int(os.environ.get("PORT", 8000))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
-    print(f"[health] Listening on port {port}")
-    server.serve_forever()
 
 
 # All messages are sent as plain text (no parse_mode) to avoid Telegram "Can't parse entities" errors.
@@ -800,10 +779,6 @@ async def post_init(app):
 
 
 if __name__ == "__main__":
-    # Start health-check server in a background thread (required by Koyeb)
-    health_thread = threading.Thread(target=_start_health_server, daemon=True)
-    health_thread.start()
-
     app = (
         ApplicationBuilder()
         .token(os.environ["TELEGRAM_TOKEN"])
