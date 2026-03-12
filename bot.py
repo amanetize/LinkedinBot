@@ -1,15 +1,11 @@
 """
-bot.py — LinkedIn Networking Bot (PythonAnywhere edition)
-
-Runs on PythonAnywhere 24/7 with NO Playwright dependency.
-When /start_cron is received, triggers a GitHub Actions workflow
-which runs scraper_job.py (with Playwright) and sends results
-back to Telegram directly.
-
-All comment approval, drafting, and posting logic stays here unchanged.
+bot.py — Works on both Koyeb (web process) and PythonAnywhere.
+On Koyeb: starts a health-check HTTP server on $PORT (required).
+On PythonAnywhere: $PORT is not set, health server is skipped.
 """
 
-import asyncio, os, random, uuid, requests
+import asyncio, os, random, uuid, requests, threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -32,14 +28,28 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")   # Personal Access Token (repo scope)
-GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")    # e.g. "amanetize/LinkedinBot"
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")
+
+
+# ── Health-check server (Koyeb requires a web process on $PORT) ───────────────
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, *args):
+        pass
+
+def _start_health_server():
+    port = int(os.environ.get("PORT", 8000))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    print(f"[health] Listening on port {port}")
+    server.serve_forever()
 
 
 # ── GitHub Actions trigger ────────────────────────────────────────────────────
-
 def trigger_scraper(target_count: int) -> bool:
-    """Fire a repository_dispatch event to kick off the GitHub Actions scraper."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
         print("[bot] GITHUB_TOKEN or GITHUB_REPO not set")
         return False
@@ -126,7 +136,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (update.message.text or "").strip()
 
-    # Custom comment
     if waiting_for_custom_comment_id is not None:
         if text.lower() == "/cancel":
             waiting_for_custom_comment_id = None
@@ -157,7 +166,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Custom comment set. See above.")
         return
 
-    # Rephrase comment
     if waiting_for_rephrase_comment_id is not None:
         if text.lower() == "/cancel":
             waiting_for_rephrase_comment_id = None
@@ -196,7 +204,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Rephrased. See above.")
         return
 
-    # Rephrase news
     if waiting_for_rephrase_news_id is not None:
         if text.lower() == "/cancel":
             waiting_for_rephrase_news_id = None
@@ -215,10 +222,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_for_rephrase_message_id = None
         await update.message.reply_text("⏳ Rephrasing news post...")
         loop = asyncio.get_event_loop()
-        search_ctx      = news_data.get("search_context", "")
-        current_content = news_data.get("content", "")
         new_content = await loop.run_in_executor(
-            None, lambda: generate_news_post_rephrase_with_instruction(search_ctx, current_content, text)
+            None, lambda: generate_news_post_rephrase_with_instruction(
+                news_data.get("search_context",""), news_data.get("content",""), text)
         )
         if not new_content:
             await update.message.reply_text("❌ Rephrase failed.")
@@ -237,7 +243,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Rephrased. See above.")
         return
 
-    # Target count
     if waiting_for_count:
         if text.isdigit() and 1 <= int(text) <= 20:
             waiting_for_count = False
@@ -246,7 +251,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Please send a number between 1 and 20.")
 
 
-# ── Comment helpers ───────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def _comment_preview_text(d: dict) -> str:
     return (
         f"👤 {d.get('author_name','Unknown')} — {d.get('author_title','')}\n\n"
@@ -283,11 +288,10 @@ def _news_keyboard(news_id: str):
 
 # ── Button handler ────────────────────────────────────────────────────────────
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global total_approved
+    global total_approved, is_scanning
     global waiting_for_custom_comment_id, waiting_for_custom_comment_message_id
     global waiting_for_rephrase_comment_id, waiting_for_rephrase_comment_message_id
     global waiting_for_rephrase_news_id, waiting_for_rephrase_message_id
-    global is_scanning
 
     query = update.callback_query
     await query.answer()
@@ -631,6 +635,11 @@ async def post_init(app):
 
 
 if __name__ == "__main__":
+    # Start health server only if PORT is set (i.e. running on Koyeb)
+    if os.environ.get("PORT"):
+        health_thread = threading.Thread(target=_start_health_server, daemon=True)
+        health_thread.start()
+
     app = (
         ApplicationBuilder()
         .token(os.environ["TELEGRAM_TOKEN"])
