@@ -489,8 +489,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         content = news_data.get("content", "")
         log_id = news_data.get("log_id")
         await query.edit_message_text("⏳ Posting to LinkedIn...")
-        loop = asyncio.get_event_loop()
-        success = await loop.run_in_executor(None, lambda: create_post(content))
+        success = await create_post(content)
         if success:
             if log_id:
                 try:
