@@ -6,14 +6,13 @@ Commands:
   /post_news        — Generate an AI news post for LinkedIn
   /stop             — Cancel everything
 
-Flow:
-  1. /start_cron → asks how many targets → scans feed → sends each live
-  2. User approves → bot scrapes comments → generates contextual comment → shows for confirmation
-  3. User confirms (Post / Regenerate / Drop) → queued for background posting
-  4. Worker posts with 5–10 min delays + live updates
+KOYEB FIX: Runs a tiny aiohttp health-check server on $PORT alongside
+the Telegram polling loop. Koyeb requires a web process that responds
+on PORT — without this the service gets killed immediately.
 """
 
-import asyncio, os, random, uuid
+import asyncio, os, random, uuid, threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -32,6 +31,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# ── Health-check server (required by Koyeb) ───────────────────────────────────
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, *args):
+        pass  # suppress noisy access logs
+
+def _start_health_server():
+    port = int(os.environ.get("PORT", 8000))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    print(f"[health] Listening on port {port}")
+    server.serve_forever()
+
+
 # All messages are sent as plain text (no parse_mode) to avoid Telegram "Can't parse entities" errors.
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -47,9 +63,9 @@ total_posted       = 0
 waiting_for_count  = False  # True when bot is waiting for target count
 waiting_for_rephrase_news_id = None
 waiting_for_rephrase_message_id = None
-waiting_for_custom_comment_id = None      # comment_id when waiting for user to type their own comment
+waiting_for_custom_comment_id = None
 waiting_for_custom_comment_message_id = None
-waiting_for_rephrase_comment_id = None    # comment_id when waiting for rephrase instruction
+waiting_for_rephrase_comment_id = None
 waiting_for_rephrase_comment_message_id = None
 
 
@@ -63,7 +79,6 @@ async def start_cron(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
 
-    # Check if count was passed as argument: /start_cron 5
     if context.args and context.args[0].isdigit():
         count = min(int(context.args[0]), 20)
         await _begin_scan(update, context, count)
@@ -73,7 +88,6 @@ async def start_cron(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _comment_preview_text(comment_data: dict) -> str:
-    """Build the comment card text for display."""
     author_name = comment_data.get("author_name", "Unknown")
     author_title = comment_data.get("author_title", "")
     url = comment_data.get("url", "")
@@ -88,7 +102,6 @@ def _comment_preview_text(comment_data: dict) -> str:
 
 
 def _comment_keyboard(comment_id: str):
-    """Keyboard for the comment draft card."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Post", callback_data=f"confirm_{comment_id}"),
@@ -103,7 +116,6 @@ def _comment_keyboard(comment_id: str):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle plain text: target count, custom comment, rephrase comment, or rephrase news."""
     global waiting_for_count
     global waiting_for_rephrase_news_id, waiting_for_rephrase_message_id
     global waiting_for_custom_comment_id, waiting_for_custom_comment_message_id
@@ -205,409 +217,367 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not news_data:
             waiting_for_rephrase_news_id = None
             waiting_for_rephrase_message_id = None
-            await update.message.reply_text("This draft expired. Use /post_news again.")
+            await update.message.reply_text("Session expired. Run /post_news again.")
             return
         instruction = text
-        waiting_for_rephrase_news_id = None
         message_id = waiting_for_rephrase_message_id
+        waiting_for_rephrase_news_id = None
         waiting_for_rephrase_message_id = None
-        await update.message.reply_text("⏳ Rephrasing with your instruction...")
+        await update.message.reply_text("⏳ Rephrasing news post...")
         loop = asyncio.get_event_loop()
-        search_ctx = news_data.get("search_context", "") if isinstance(news_data, dict) else ""
-        current = news_data.get("content", "") if isinstance(news_data, dict) else news_data
+        search_ctx = news_data.get("search_context", "")
+        current_content = news_data.get("content", "")
         new_content = await loop.run_in_executor(
             None,
-            lambda: generate_news_post_rephrase_with_instruction(search_ctx, current, instruction),
+            lambda: generate_news_post_rephrase_with_instruction(search_ctx, current_content, instruction),
         )
         if not new_content:
-            await update.message.reply_text("❌ Rephrase failed. Try again or use Fetch again.")
+            await update.message.reply_text("❌ Rephrase failed. Try /post_news again.")
             return
-        news_log_id = news_data.get("log_id") if isinstance(news_data, dict) else None
-        if news_log_id:
+        news_data["content"] = new_content
+        ready_news[news_id] = news_data
+        log_id = news_data.get("log_id")
+        if log_id:
             try:
-                log_news_draft_added(news_log_id, new_content, "rephrase", f"📰 Draft LinkedIn Post:\n\n{new_content}")
+                log_news_draft_added(log_id, new_content, "rephrase_instruction", None)
             except Exception as e:
-                print(f"[bot] log_news_draft_added rephrase error: {e}")
-        ready_news[news_id] = {"content": new_content, "search_context": search_ctx, "log_id": news_log_id}
-        keyboard = _news_keyboard(news_id)
+                print(f"[bot] log news draft error: {e}")
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Post to LinkedIn", callback_data=f"postnews_{news_id}"),
+                InlineKeyboardButton("❌ Drop", callback_data=f"dropnews_{news_id}"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Rephrase", callback_data=f"repnews_{news_id}"),
+                InlineKeyboardButton("🔃 Fetch again", callback_data=f"fetchnews_{news_id}"),
+            ],
+        ])
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=message_id,
-            text=f"📰 Draft LinkedIn Post:\n\n{new_content}",
+            text=f"📰 Draft LinkedIn Post (rephrased):\n\n{new_content}",
             reply_markup=keyboard,
         )
         await update.message.reply_text("✅ Rephrased. See the updated draft above.")
         return
 
-    # Target count
-    if not waiting_for_count:
-        return
-    if text.isdigit() and 1 <= int(text) <= 20:
-        waiting_for_count = False
-        await _begin_scan(update, context, int(text))
-    else:
-        await update.message.reply_text("Please send a number between 1 and 20.")
+    # Target count input
+    if waiting_for_count:
+        if text.isdigit():
+            count = min(int(text), 20)
+            waiting_for_count = False
+            await _begin_scan(update, context, count)
+        else:
+            await update.message.reply_text("Please enter a number between 1 and 20.")
 
 
-async def _begin_scan(update, context, target_count):
-    global is_scanning, scan_task, total_approved, total_posted, chat_id
+# ── Begin scan ────────────────────────────────────────────────────────────────
+async def _begin_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, count: int):
+    global is_scanning, scan_task
 
-    if daily_limit_reached():
-        await update.message.reply_text("🛑 Daily comment limit (10) reached. Try again tomorrow.")
-        return
-
-    chat_id = update.effective_chat.id
     is_scanning = True
-    total_approved = 0
-    total_posted = 0
-    pending_targets.clear()
+    await update.message.reply_text(f"🔍 Scanning LinkedIn for {count} targets... this takes a few minutes.")
 
-    await update.message.reply_text(
-        f"🚀 Scanning for {target_count} targets...\n"
-        f"I'll send them as I find them."
-    )
-
-    scan_task = asyncio.create_task(_run_scan(context.bot, target_count))
+    loop = asyncio.get_event_loop()
+    scan_task = asyncio.create_task(_run_scan(context.bot, count, loop))
 
 
-async def _run_scan(bot, target_count):
-    """Background scan — sends targets without drafts."""
+async def _run_scan(bot, max_posts: int, loop):
     global is_scanning
-    found_count = 0
 
-    async def on_target_found(data):
-        nonlocal found_count
+    try:
+        posts = await loop.run_in_executor(None, lambda: get_feed_posts(max_posts))
 
-        if already_commented(data["url"]):
+        if not posts:
+            if chat_id:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="😕 No matching posts found this scan. Try /start_cron again later.",
+                )
             return
-
-        found_count += 1
-        target_id = str(uuid.uuid4())[:8]
-        author = data.get("author_name", "Unknown")
-        title  = data.get("author_title", "")
-        reason = data.get("reason", "N/A")
-        msg = (
-            f"🎯 Target #{found_count}\n\n"
-            f"👤 {author} — {title}\n\n"
-            f"🔗 {data['url']}\n\n"
-            f"📝 {data['text'][:250]}...\n\n"
-            f"💡 Why: {reason}"
-        )
-        raw_text = data.get("raw_text", data["text"])
-        try:
-            log_id = log_target_created(
-                raw_text=raw_text,
-                url=data["url"],
-                author_name=author,
-                author_title=title,
-                reason=reason,
-                tele_msg=msg,
-                target_id=target_id,
-            )
-        except Exception as e:
-            log_id = None
-            print(f"[bot] log_target_created error: {e}")
-        pending_targets[target_id] = {
-            "url":          data["url"],
-            "text":         data["text"],
-            "author_name":  author,
-            "author_title": title,
-            "reason":       reason,
-            "log_id":       log_id,
-        }
-
-        keyboard = [[
-            InlineKeyboardButton("✅ Approve", callback_data=f"approve_{target_id}"),
-            InlineKeyboardButton("❌ Skip",    callback_data=f"skip_{target_id}"),
-        ]]
 
         await bot.send_message(
             chat_id=chat_id,
-            text=msg,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            text=f"✅ Found {len(posts)} matching post(s). Sending for review...",
         )
 
-    try:
-        await get_feed_posts(on_target_found, max_targets=target_count)
-    except asyncio.CancelledError:
-        await bot.send_message(chat_id=chat_id, text="🛑 Scan cancelled.")
-        return
+        for post in posts:
+            if not is_scanning:
+                break
+            target_id = str(uuid.uuid4())[:8]
+            author_name = post.get("author_name", "Unknown")
+            author_title = post.get("author_title", "")
+            post_text = post.get("post_text", "")
+            url = post.get("url", "")
+
+            pending_targets[target_id] = {
+                "author_name":  author_name,
+                "author_title": author_title,
+                "text":         post_text,
+                "url":          url,
+                "target_id":    target_id,
+            }
+
+            msg_text = (
+                f"🎯 Target\n\n"
+                f"👤 {author_name} — {author_title}\n\n"
+                f"🔗 {url}\n\n"
+                f"📝 {post_text[:200]}..."
+            )
+
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"approve_{target_id}"),
+                    InlineKeyboardButton("❌ Skip", callback_data=f"skip_{target_id}"),
+                ],
+            ])
+
+            tele_msg = await bot.send_message(
+                chat_id=chat_id,
+                text=msg_text,
+                reply_markup=keyboard,
+            )
+
+            log_id = None
+            try:
+                log_id = log_target_created(
+                    raw_text=post_text,
+                    url=url,
+                    author_name=author_name,
+                    author_title=author_title,
+                    reason=post.get("reason", ""),
+                    tele_msg=msg_text,
+                    target_id=target_id,
+                )
+            except Exception as e:
+                print(f"[bot] log target created error: {e}")
+
+            pending_targets[target_id]["log_id"] = log_id
+
     except Exception as e:
-        await bot.send_message(chat_id=chat_id, text=f"❌ Scan error: {e}")
+        print(f"[bot] Scan error: {e}")
+        if chat_id:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Scan failed: {e}",
+            )
     finally:
         is_scanning = False
 
-    await bot.send_message(
-        chat_id=chat_id,
-        text=f"🏁 Scan complete! Found {found_count} targets.\nApprove the ones you want to comment on.",
-    )
+
+# ── Button handler ────────────────────────────────────────────────────────────
+async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global waiting_for_rephrase_news_id, waiting_for_rephrase_message_id
+    global waiting_for_custom_comment_id, waiting_for_custom_comment_message_id
+    global waiting_for_rephrase_comment_id, waiting_for_rephrase_comment_message_id
+    global total_approved
+
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    # ── Target buttons ────────────────────────────────────────────────────────
+    if data.startswith("approve_"):
+        target_id = data[len("approve_"):]
+        target_data = pending_targets.get(target_id)
+        if not target_data:
+            await query.edit_message_text("This target expired.")
+            return
+        total_approved += 1
+        log_id = target_data.get("log_id")
+        if log_id:
+            try:
+                log_target_action(log_id, "approved")
+            except Exception as e:
+                print(f"[bot] log approve error: {e}")
+        await query.edit_message_text(
+            text=f"⏳ Generating comment for {target_data['author_name']}..."
+        )
+        asyncio.create_task(_generate_and_show_comment(context.bot, target_data, query.message.message_id))
+
+    elif data.startswith("skip_"):
+        target_id = data[len("skip_"):]
+        target_data = pending_targets.pop(target_id, None)
+        log_id = target_data.get("log_id") if target_data else None
+        if log_id:
+            try:
+                log_target_action(log_id, "skipped")
+                log_target_final(log_id, "skipped")
+            except Exception as e:
+                print(f"[bot] log skip error: {e}")
+        await query.edit_message_text("⏭️ Skipped.")
+
+    # ── Comment buttons ───────────────────────────────────────────────────────
+    elif data.startswith("confirm_"):
+        comment_id = data[len("confirm_"):]
+        comment_data = ready_comments.get(comment_id)
+        if not comment_data:
+            await query.edit_message_text("This comment expired.")
+            return
+        log_id = comment_data.get("log_id")
+        if log_id:
+            try:
+                log_target_action(log_id, "queued")
+            except Exception as e:
+                print(f"[bot] log queued error: {e}")
+        await approved_queue.put(comment_data)
+        await query.edit_message_text(
+            text=f"✅ Queued! Comment on {comment_data['author_name']}'s post.\nQueue size: {approved_queue.qsize()}"
+        )
+
+    elif data.startswith("drop_"):
+        comment_id = data[len("drop_"):]
+        comment_data = ready_comments.pop(comment_id, None)
+        log_id = comment_data.get("log_id") if comment_data else None
+        if log_id:
+            try:
+                log_target_action(log_id, "dropped")
+                log_target_final(log_id, "dropped")
+            except Exception as e:
+                print(f"[bot] log drop error: {e}")
+        await query.edit_message_text("🗑️ Dropped.")
+
+    elif data.startswith("regen_"):
+        comment_id = data[len("regen_"):]
+        comment_data = ready_comments.get(comment_id)
+        if not comment_data:
+            await query.edit_message_text("This comment expired.")
+            return
+        await query.edit_message_text(
+            text=f"🔄 Regenerating comment for {comment_data['author_name']}..."
+        )
+        asyncio.create_task(_generate_and_show_comment(context.bot, comment_data, query.message.message_id, comment_id=comment_id))
+
+    elif data.startswith("customcomment_"):
+        comment_id = data[len("customcomment_"):]
+        comment_data = ready_comments.get(comment_id)
+        if not comment_data:
+            await query.edit_message_text("This comment expired.")
+            return
+        waiting_for_custom_comment_id = comment_id
+        waiting_for_custom_comment_message_id = query.message.message_id
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="📝 Type your custom comment (or /cancel):",
+        )
+
+    elif data.startswith("repcomment_"):
+        comment_id = data[len("repcomment_"):]
+        comment_data = ready_comments.get(comment_id)
+        if not comment_data:
+            await query.edit_message_text("This comment expired.")
+            return
+        waiting_for_rephrase_comment_id = comment_id
+        waiting_for_rephrase_comment_message_id = query.message.message_id
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="✏️ Give a rephrase instruction (e.g. 'make it shorter', 'more formal'):",
+        )
+
+    # ── News buttons ──────────────────────────────────────────────────────────
+    elif data.startswith("postnews_"):
+        news_id = data[len("postnews_"):]
+        news_data = ready_news.get(news_id)
+        if not news_data:
+            await query.edit_message_text("This news post expired.")
+            return
+        content = news_data.get("content", "")
+        log_id = news_data.get("log_id")
+        await query.edit_message_text("⏳ Posting to LinkedIn...")
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(None, lambda: create_post(content))
+        if success:
+            if log_id:
+                try:
+                    log_news_action(log_id, "posted", content)
+                except Exception as e:
+                    print(f"[bot] log news post error: {e}")
+            await query.edit_message_text("✅ Posted to LinkedIn!")
+        else:
+            await query.edit_message_text("❌ Failed to post. Check logs.")
+
+    elif data.startswith("dropnews_"):
+        news_id = data[len("dropnews_"):]
+        news_data = ready_news.pop(news_id, None)
+        log_id = news_data.get("log_id") if news_data else None
+        if log_id:
+            try:
+                log_news_action(log_id, "dropped")
+            except Exception as e:
+                print(f"[bot] log news drop error: {e}")
+        await query.edit_message_text("🗑️ News post dropped.")
+
+    elif data.startswith("repnews_"):
+        news_id = data[len("repnews_"):]
+        news_data = ready_news.get(news_id)
+        if not news_data:
+            await query.edit_message_text("This news post expired.")
+            return
+        waiting_for_rephrase_news_id = news_id
+        waiting_for_rephrase_message_id = query.message.message_id
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="✏️ Give a rephrase instruction (e.g. 'make it more casual', 'focus on funding only'):",
+        )
+
+    elif data.startswith("fetchnews_"):
+        news_id = data[len("fetchnews_"):]
+        await query.edit_message_text("🔃 Fetching fresh news...")
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, generate_news_post)
+        content = result.get("content", "")
+        search_ctx = result.get("search_context", "")
+        if not content:
+            await query.edit_message_text("❌ Failed to fetch news. Try /post_news again.")
+            return
+        new_news_id = str(uuid.uuid4())[:8]
+        log_id = None
+        try:
+            log_id = log_news_created(search_ctx, content, "fetch", content, new_news_id)
+        except Exception as e:
+            print(f"[bot] log news created error: {e}")
+        ready_news[new_news_id] = {"content": content, "search_context": search_ctx, "log_id": log_id}
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Post to LinkedIn", callback_data=f"postnews_{new_news_id}"),
+                InlineKeyboardButton("❌ Drop", callback_data=f"dropnews_{new_news_id}"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Rephrase", callback_data=f"repnews_{new_news_id}"),
+                InlineKeyboardButton("🔃 Fetch again", callback_data=f"fetchnews_{new_news_id}"),
+            ],
+        ])
+        await query.edit_message_text(
+            text=f"📰 Fresh Draft:\n\n{content}",
+            reply_markup=keyboard,
+        )
 
 
 # ── /post_news ────────────────────────────────────────────────────────────────
 async def post_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_id
     chat_id = update.effective_chat.id
-
-    await update.message.reply_text("🔍 Searching latest AI news and drafting a post...")
+    await update.message.reply_text("🔍 Searching for top AI news this week...")
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, generate_news_post)
-    content = result.get("content", "") if isinstance(result, dict) else (result or "")
-    search_context = result.get("search_context", "") if isinstance(result, dict) else ""
+    content = result.get("content", "")
+    search_ctx = result.get("search_context", "")
 
     if not content:
         await update.message.reply_text("❌ Failed to generate news post. Try again.")
         return
 
     news_id = str(uuid.uuid4())[:8]
-    tele_msg = f"📰 Draft LinkedIn Post:\n\n{content}"
+    log_id = None
     try:
-        news_log_id = log_news_created(
-            search_raw=search_context,
-            draft_content=content,
-            source="fetch",
-            tele_msg=tele_msg,
-            news_id=news_id,
-        )
+        log_id = log_news_created(search_ctx, content, "fetch", content, news_id)
     except Exception as e:
-        news_log_id = None
-        print(f"[bot] log_news_created error: {e}")
-    ready_news[news_id] = {"content": content, "search_context": search_context, "log_id": news_log_id}
+        print(f"[bot] log news created error: {e}")
 
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Post to LinkedIn", callback_data=f"postnews_{news_id}"),
-            InlineKeyboardButton("❌ Drop", callback_data=f"dropnews_{news_id}"),
-        ],
-        [
-            InlineKeyboardButton("🔄 Regenerate", callback_data=f"regennews_{news_id}"),
-            InlineKeyboardButton("🔃 Fetch again", callback_data=f"fetchnews_{news_id}"),
-        ],
-    ]
+    ready_news[news_id] = {"content": content, "search_context": search_ctx, "log_id": log_id}
 
-    await update.message.reply_text(tele_msg, reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-# ── Button handler ────────────────────────────────────────────────────────────
-async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global total_approved, waiting_for_custom_comment_id, waiting_for_custom_comment_message_id
-    global waiting_for_rephrase_comment_id, waiting_for_rephrase_comment_message_id
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    # ── Target approve/skip ──
-    if data.startswith("approve_"):
-        target_id = data.replace("approve_", "")
-        target_data = pending_targets.pop(target_id, None)
-
-        if not target_data:
-            await query.edit_message_text("⚠️ This target has expired.")
-            return
-
-        total_approved += 1
-        author = target_data.get("author_name", "Unknown")
-        log_id = target_data.get("log_id")
-        if log_id:
-            try:
-                log_target_action(log_id, "approve")
-            except Exception as e:
-                print(f"[bot] log approve error: {e}")
-        await query.edit_message_text(
-            f"✅ Approved #{total_approved} — {author}\n"
-            f"⏳ Generating comment (reading other comments + web search)...",
-        )
-
-        msg_id = query.message.message_id
-        asyncio.create_task(_prepare_comment(context.bot, target_data, msg_id))
-
-    elif data.startswith("skip_"):
-        target_id = data.replace("skip_", "")
-        target_data = pending_targets.pop(target_id, None)
-        if target_data:
-            log_id = target_data.get("log_id")
-            if log_id:
-                try:
-                    log_target_action(log_id, "skip")
-                    log_target_final(log_id, "skipped")
-                except Exception as e:
-                    print(f"[bot] log skip error: {e}")
-            author = target_data.get("author_name", "Unknown")
-            title = target_data.get("author_title", "")
-            skip_msg = (
-                f"🎯 Target\n\n"
-                f"👤 {author} — {title}\n\n"
-                f"🔗 {target_data['url']}\n\n"
-                f"📝 {target_data['text'][:250]}...\n\n"
-                f"💡 Why: {target_data.get('reason', 'N/A')}\n\n"
-                f"❌ Skipped."
-            )
-            await query.edit_message_text(skip_msg)
-        else:
-            await query.edit_message_text("❌ Skipped (target already gone).")
-
-    # ── Comment confirm/regen/drop ──
-    elif data.startswith("confirm_"):
-        comment_id = data.replace("confirm_", "")
-        comment_data = ready_comments.pop(comment_id, None)
-        if not comment_data:
-            await query.edit_message_text("⚠️ This comment has expired.")
-            return
-        log_id = comment_data.get("log_id")
-        if log_id:
-            try:
-                log_target_action(log_id, "queued")
-                log_target_final(log_id, "queued", comment_data["draft"])
-            except Exception as e:
-                print(f"[bot] log queued error: {e}")
-        await approved_queue.put(comment_data)
-        author_name = comment_data.get("author_name", "Unknown")
-        queued_msg = (
-            f"👤 {author_name} — {comment_data.get('author_title', '')}\n\n"
-            f"💬 Your comment:\n{comment_data['draft'][:300]}\n\n"
-            f"📤 Queued for posting."
-        )
-        await query.edit_message_text(queued_msg)
-
-    elif data.startswith("regen_"):
-        comment_id = data.replace("regen_", "")
-        comment_data = ready_comments.pop(comment_id, None)
-        if not comment_data:
-            await query.edit_message_text("⚠️ This comment has expired.")
-            return
-        msg_id = query.message.message_id
-        await query.edit_message_text("🔄 Regenerating comment...")
-        asyncio.create_task(_prepare_comment(context.bot, comment_data, msg_id))
-
-    elif data.startswith("customcomment_"):
-        comment_id = data.replace("customcomment_", "")
-        comment_data = ready_comments.get(comment_id)
-        if not comment_data:
-            await query.edit_message_text("⚠️ This comment has expired.")
-            return
-        waiting_for_custom_comment_id = comment_id
-        waiting_for_custom_comment_message_id = query.message.message_id
-        await query.edit_message_text(
-            "📝 Send your own comment in the next message. It will replace the draft.\n\n"
-            "Send /cancel to cancel."
-        )
-
-    elif data.startswith("repcomment_"):
-        comment_id = data.replace("repcomment_", "")
-        comment_data = ready_comments.get(comment_id)
-        if not comment_data:
-            await query.edit_message_text("⚠️ This comment has expired.")
-            return
-        waiting_for_rephrase_comment_id = comment_id
-        waiting_for_rephrase_comment_message_id = query.message.message_id
-        await query.edit_message_text(
-            "✏️ How would you like to rephrase? Send your instruction in the next message.\n\n"
-            "Examples: \"make it shorter\", \"more formal\", \"add a question\", \"friendlier tone\".\n\n"
-            "Send /cancel to cancel."
-        )
-
-    elif data.startswith("drop_"):
-        comment_id = data.replace("drop_", "")
-        comment_data = ready_comments.pop(comment_id, None)
-        if comment_data:
-            log_id = comment_data.get("log_id")
-            if log_id:
-                try:
-                    log_target_action(log_id, "drop")
-                    log_target_final(log_id, "dropped")
-                except Exception as e:
-                    print(f"[bot] log drop comment error: {e}")
-            author_name = comment_data.get("author_name", "Unknown")
-            author_title = comment_data.get("author_title", "")
-            url = comment_data.get("url", "")
-            post_text = comment_data.get("text", "")[:200]
-            draft = comment_data.get("draft", "")
-            drop_msg = (
-                f"👤 {author_name} — {author_title}\n\n"
-                f"🔗 {url}\n\n"
-                f"📝 {post_text}...\n\n"
-                f"💬 Your comment:\n{draft}\n\n"
-                f"🗑 Dropped."
-            )
-            await query.edit_message_text(drop_msg)
-        else:
-            await query.edit_message_text("🗑 Dropped.")
-
-    # ── News post/regen/fetch/drop ──
-    elif data.startswith("postnews_"):
-        news_id = data.replace("postnews_", "")
-        news_data = ready_news.pop(news_id, None)
-        if not news_data:
-            await query.edit_message_text("⚠️ This post has expired.")
-            return
-        content = news_data["content"] if isinstance(news_data, dict) else news_data
-        news_log_id = news_data.get("log_id") if isinstance(news_data, dict) else None
-        await query.edit_message_text("⏳ Publishing to LinkedIn...")
-        asyncio.create_task(_publish_news(context.bot, content, query.message.message_id, news_log_id))
-
-    elif data.startswith("repnews_"):
-        news_id = data.replace("repnews_", "")
-        news_data = ready_news.get(news_id)
-        if not news_data:
-            await query.edit_message_text("⚠️ This post has expired.")
-            return
-        global waiting_for_rephrase_news_id, waiting_for_rephrase_message_id
-        waiting_for_rephrase_news_id = news_id
-        waiting_for_rephrase_message_id = query.message.message_id
-        await query.edit_message_text(
-            "✏️ How would you like to rephrase? Send your instruction in the next message.\n\n"
-            "Examples: \"make it more casual\", \"focus on funding only\", \"shorter and punchier\", \"add a question at the end\".\n\n"
-            "Send /cancel to cancel."
-        )
-
-    elif data.startswith("fetchnews_"):
-        news_id = data.replace("fetchnews_", "")
-        ready_news.pop(news_id, None)
-        await query.edit_message_text("🔃 Fetching fresh news (Tavily + Llama)...")
-        asyncio.create_task(_fetch_news(context.bot, query.message.message_id))
-
-    elif data.startswith("dropnews_"):
-        news_id = data.replace("dropnews_", "")
-        news_data = ready_news.pop(news_id, None)
-        if news_data:
-            news_log_id = news_data.get("log_id") if isinstance(news_data, dict) else None
-            if news_log_id:
-                try:
-                    log_news_action(news_log_id, "drop")
-                except Exception as e:
-                    print(f"[bot] log news drop error: {e}")
-            content = news_data["content"] if isinstance(news_data, dict) else news_data
-            await query.edit_message_text(
-                f"📰 Draft LinkedIn Post:\n\n{content}\n\n🗑 Dropped."
-            )
-        else:
-            await query.edit_message_text("🗑 Dropped.")
-
-
-async def _publish_news(bot, content, message_id, log_id=None):
-    """Publish a news post to LinkedIn."""
-    success = await create_post(content)
-    if log_id:
-        try:
-            log_news_action(log_id, "post", content_posted=content if success else None)
-        except Exception as e:
-            print(f"[bot] log news post error: {e}")
-    if success and chat_id:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=f"✅ Posted to LinkedIn!\n\n{content}",
-        )
-    elif chat_id:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text="❌ Failed to publish. Check debug_screenshots/.",
-        )
-
-
-def _news_keyboard(news_id):
-    return InlineKeyboardMarkup([
+    keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Post to LinkedIn", callback_data=f"postnews_{news_id}"),
             InlineKeyboardButton("❌ Drop", callback_data=f"dropnews_{news_id}"),
@@ -618,58 +588,23 @@ def _news_keyboard(news_id):
         ],
     ])
 
-
-async def _fetch_news(bot, message_id):
-    """Fetch fresh AI news via Tavily and draft a new post with Llama."""
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, generate_news_post)
-    content = result.get("content", "") if isinstance(result, dict) else (result or "")
-    search_context = result.get("search_context", "") if isinstance(result, dict) else ""
-
-    if not content:
-        if chat_id:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text="❌ Failed to fetch. Try /post_news again.",
-            )
-        return
-
-    news_id = str(uuid.uuid4())[:8]
-    tele_msg = f"📰 Draft LinkedIn Post:\n\n{content}"
-    try:
-        fetch_log_id = log_news_created(
-            search_raw=search_context,
-            draft_content=content,
-            source="fetch",
-            tele_msg=tele_msg,
-            news_id=news_id,
-        )
-    except Exception as e:
-        fetch_log_id = None
-        print(f"[bot] log_news_created fetch error: {e}")
-    ready_news[news_id] = {"content": content, "search_context": search_context, "log_id": fetch_log_id}
-
-    if chat_id:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=tele_msg,
-            reply_markup=_news_keyboard(news_id),
-        )
+    await update.message.reply_text(
+        text=f"📰 Draft LinkedIn Post:\n\n{content}",
+        reply_markup=keyboard,
+    )
 
 
-# ── Comment preparation ──────────────────────────────────────────────────────
-async def _prepare_comment(bot, target_data, message_id=None):
-    """Scrape existing comments from the post, then generate a contextual comment (so we don't repeat others and match tone)."""
-    url          = target_data["url"]
-    post_text    = target_data["text"]
-    author_title = target_data.get("author_title", "Professional")
+# ── Generate + show comment ───────────────────────────────────────────────────
+async def _generate_and_show_comment(bot, target_data: dict, message_id: int, comment_id: str = None):
     author_name  = target_data.get("author_name", "Unknown")
+    author_title = target_data.get("author_title", "")
+    post_text    = target_data.get("text", "")
+    url          = target_data.get("url", "")
 
+    existing_comments = []
     try:
-        existing_comments = await scrape_comments(url)
-        print(f"[bot] Scraped {len(existing_comments)} comments from {author_name}'s post")
+        loop = asyncio.get_event_loop()
+        existing_comments = await loop.run_in_executor(None, lambda: scrape_comments(url)) if url else []
     except Exception as e:
         print(f"[bot] Comment scraping error: {e}")
         existing_comments = []
@@ -694,12 +629,15 @@ async def _prepare_comment(bot, target_data, message_id=None):
             log_target_comment_version(log_id, comment)
         except Exception as e:
             print(f"[bot] log comment version error: {e}")
-    comment_id = str(uuid.uuid4())[:8]
+
+    if comment_id is None:
+        comment_id = str(uuid.uuid4())[:8]
+
     ready_comments[comment_id] = {
         **target_data,
-        "draft":             comment,
-        "existing_comments":  existing_comments,
-        "log_id":            log_id,
+        "draft":            comment,
+        "existing_comments": existing_comments,
+        "log_id":           log_id,
     }
 
     preview_text = _comment_preview_text(ready_comments[comment_id])
@@ -722,7 +660,6 @@ async def _prepare_comment(bot, target_data, message_id=None):
 
 # ── Background Worker ─────────────────────────────────────────────────────────
 async def worker(app):
-    """Posts approved comments one-by-one with safe delays."""
     global total_posted
 
     while True:
@@ -767,7 +704,6 @@ async def worker(app):
                 post_snippet=target_data.get("text", "")[:300],
                 comment=comment,
             )
-
             remaining = approved_queue.qsize()
             if chat_id:
                 await app.bot.send_message(
@@ -781,7 +717,7 @@ async def worker(app):
             if chat_id:
                 await app.bot.send_message(
                     chat_id=chat_id,
-                    text=f"❌ Failed to post on {author}'s post. Check debug_screenshots/.",
+                    text=f"❌ Failed to post on {author}'s post.",
                 )
 
         approved_queue.task_done()
@@ -804,7 +740,6 @@ async def worker(app):
 
 # ── /cancel ───────────────────────────────────────────────────────────────────
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel waiting for rephrase/custom input (news or comment)."""
     global waiting_for_rephrase_news_id, waiting_for_rephrase_message_id
     global waiting_for_custom_comment_id, waiting_for_custom_comment_message_id
     global waiting_for_rephrase_comment_id, waiting_for_rephrase_comment_message_id
@@ -861,6 +796,10 @@ async def post_init(app):
 
 
 if __name__ == "__main__":
+    # Start health-check server in a background thread (required by Koyeb)
+    health_thread = threading.Thread(target=_start_health_server, daemon=True)
+    health_thread.start()
+
     app = (
         ApplicationBuilder()
         .token(os.environ["TELEGRAM_TOKEN"])
@@ -872,7 +811,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CallbackQueryHandler(handle_button))
-    # Text handler for capturing target count (must be added AFTER command handlers)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("🤖 Bot is running. Commands: /start_cron, /post_news, /stop")
