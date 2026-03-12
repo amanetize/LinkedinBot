@@ -163,6 +163,7 @@ Write a short LinkedIn post with exactly 5 bullet points. Pick the TOP 5 most in
 RULES:
 - Write ONLY the post content, nothing else.
 - Exactly 5 bullet points. Start each line with • or - and one news item per line (one sentence each).
+- Include every noun like numbers and names to keep it information rich.
 - Sound like a real person sharing the week's top AI news. Not a journalist.
 - Simple, conversational English. Simple punctuation only.
 - NO hyphens or dashes in the middle of sentences (only for bullet markers).
