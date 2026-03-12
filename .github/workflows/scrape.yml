@@ -1,0 +1,35 @@
+name: LinkedIn Scraper
+
+on:
+  repository_dispatch:
+    types: [run_scraper]
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run scraper
+        env:
+          LI_EMAIL:        ${{ secrets.LI_EMAIL }}
+          LI_PASSWORD:     ${{ secrets.LI_PASSWORD }}
+          TELEGRAM_TOKEN:  ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GROQ_API_KEY:    ${{ secrets.GROQ_API_KEY }}
+          TAVILY_API_KEY:  ${{ secrets.TAVILY_API_KEY }}
+          MONGO_URI:       ${{ secrets.MONGO_URI }}
+          TARGET_COUNT:    ${{ github.event.client_payload.target_count }}
+        run: python scraper_job.py
