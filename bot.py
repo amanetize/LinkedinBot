@@ -286,7 +286,12 @@ async def _run_scan(bot, max_posts: int, loop):
     global is_scanning
 
     try:
-        posts = await loop.run_in_executor(None, lambda: get_feed_posts(max_posts))
+        posts = []
+
+        async def _collect(post_data):
+            posts.append(post_data)
+
+        await get_feed_posts(_collect, max_targets=max_posts)
 
         if not posts:
             if chat_id:
