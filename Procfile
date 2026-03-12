@@ -1,1 +1,1 @@
-web: python3 bot.py
+web: playwright install chromium && python bot.py
