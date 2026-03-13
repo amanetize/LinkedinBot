@@ -23,6 +23,7 @@ from db import (
     log_target_created, log_target_action,
     log_target_comment_version, log_target_final,
     log_news_created, log_news_draft_added, log_news_action,
+    get_pending_target,
 )
 from dotenv import load_dotenv
 
@@ -299,7 +300,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("approve_"):
         target_id   = data[len("approve_"):]
+        # Check in-memory first (local scan), then MongoDB (GitHub Actions scan)
         target_data = pending_targets.pop(target_id, None)
+        if not target_data:
+            try:
+                target_data = get_pending_target(target_id)
+            except Exception as e:
+                print(f"[bot] get_pending_target error: {e}")
         if not target_data:
             await query.edit_message_text("⚠️ This target has expired.")
             return
