@@ -23,7 +23,8 @@ except ImportError:
 load_dotenv()
 
 # Point Playwright to the workspace cache so it survives on Koyeb
-os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/workspace/.playwright'
+if os.path.exists('/workspace'):
+    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/workspace/.playwright'
 
 # ── Config ────────────────────────────────────────────────────────────────────
 COOKIES_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "li_cookies.json")

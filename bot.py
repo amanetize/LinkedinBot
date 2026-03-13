@@ -7,7 +7,8 @@ On PythonAnywhere: $PORT is not set, health server is skipped.
 import asyncio, os, random, uuid, requests, threading
 
 # Configure Playwright browsers path before any Playwright modules are imported or initialized
-os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/workspace/.playwright'
+if os.path.exists('/workspace'):
+    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/workspace/.playwright'
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
