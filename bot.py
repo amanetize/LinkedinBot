@@ -16,7 +16,7 @@ from ai import (
     generate_news_post_rephrase_with_instruction,
     generate_comment_rephrase_with_instruction,
 )
-from poster import post_comment, scrape_comments, create_post
+from poster import post_comment, create_post
 from db import (
     already_commented, mark_commented, save_warm_lead,
     daily_limit_reached, increment_today_count,
@@ -508,11 +508,9 @@ async def _prepare_comment(bot, target_data: dict, message_id: int):
     author_title = target_data.get("author_title", "Professional")
     author_name  = target_data.get("author_name", "Unknown")
 
-    try:
-        existing_comments = await scrape_comments(url)
-    except Exception as e:
-        print(f"[bot] scrape_comments error: {e}")
-        existing_comments = []
+    # Use comments scraped during feed scan (GitHub Actions), no live scrape needed
+    existing_comments = target_data.get("existing_comments", [])
+    print(f"[bot] Using {len(existing_comments)} pre-scraped comments for {author_name}")
 
     loop    = asyncio.get_event_loop()
     comment = await loop.run_in_executor(

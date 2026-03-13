@@ -59,20 +59,22 @@ def get_cookies() -> list:
 
 def save_pending_target(target_id: str, url: str, text: str,
                         author_name: str, author_title: str,
-                        reason: str, log_id: str = None):
+                        reason: str, log_id: str = None,
+                        existing_comments: list = None):
     """scraper_job.py saves targets here. bot.py reads them on Approve."""
     db = get_db()
     db.pending_targets.replace_one(
         {"target_id": target_id},
         {
-            "target_id":    target_id,
-            "url":          url,
-            "text":         text,
-            "author_name":  author_name,
-            "author_title": author_title,
-            "reason":       reason,
-            "log_id":       log_id,
-            "created_at":   _now(),
+            "target_id":         target_id,
+            "url":               url,
+            "text":              text,
+            "author_name":       author_name,
+            "author_title":      author_title,
+            "reason":            reason,
+            "log_id":            log_id,
+            "existing_comments": existing_comments or [],
+            "created_at":        _now(),
         },
         upsert=True,
     )

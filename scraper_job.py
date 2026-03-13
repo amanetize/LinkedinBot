@@ -8,6 +8,7 @@ then sends the Telegram card. bot.py reads from MongoDB on Approve.
 import asyncio, os, uuid, requests
 from dotenv import load_dotenv
 from db import already_commented, log_target_created, save_pending_target
+from poster import scrape_comments
 from feed_reader import get_feed_posts
 
 load_dotenv()
@@ -53,6 +54,14 @@ async def main():
             f"💡 Why: {reason}"
         )
 
+        # Scrape existing comments now (GitHub Actions IP is trusted)
+        existing_comments = []
+        try:
+            existing_comments = await scrape_comments(url)
+            print(f"[scraper] Scraped {len(existing_comments)} comments for {author}")
+        except Exception as e:
+            print(f"[scraper] comment scrape error: {e}")
+
         # Save to MongoDB FIRST so bot.py can retrieve on Approve
         log_id = None
         try:
@@ -68,6 +77,7 @@ async def main():
                 target_id=target_id, url=url, text=text,
                 author_name=author, author_title=title,
                 reason=reason, log_id=log_id,
+                existing_comments=existing_comments,
             )
         except Exception as e:
             print(f"[scraper] save_pending_target error: {e}")
