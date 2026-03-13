@@ -82,7 +82,14 @@ async def post_comment(post_url: str, comment_text: str) -> bool:
             )
 
             # Load cookies
-            if os.path.exists(COOKIES_PATH):
+            
+            # Load cookies from Environment Var first, then File
+            if os.environ.get("LI_COOKIES_B64"):
+                import base64
+                cookies_json = base64.b64decode(os.environ.get("LI_COOKIES_B64")).decode('utf-8')
+                await context.add_cookies(json.loads(cookies_json))
+                page = await context.new_page()
+            elif os.path.exists(COOKIES_PATH):
                 with open(COOKIES_PATH, "r") as f:
                     await context.add_cookies(json.load(f))
                 page = await context.new_page()
@@ -213,7 +220,14 @@ async def scrape_comments(post_url: str, max_comments: int = 15) -> list:
                 ),
             )
 
-            if os.path.exists(COOKIES_PATH):
+            
+            # Load cookies from Environment Var first, then File
+            if os.environ.get("LI_COOKIES_B64"):
+                import base64
+                cookies_json = base64.b64decode(os.environ.get("LI_COOKIES_B64")).decode('utf-8')
+                await context.add_cookies(json.loads(cookies_json))
+                page = await context.new_page()
+            elif os.path.exists(COOKIES_PATH):
                 with open(COOKIES_PATH, "r") as f:
                     await context.add_cookies(json.load(f))
                 page = await context.new_page()
