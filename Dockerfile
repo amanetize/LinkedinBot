@@ -1,5 +1,5 @@
 # Use the official Microsoft Playwright image with all dependencies pre-installed
-FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.58.0-jammy
 
 # Set work directory
 WORKDIR /app
