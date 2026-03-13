@@ -86,11 +86,11 @@ async def post_comment(post_url: str, comment_text: str) -> bool:
                 with open(COOKIES_PATH, "r") as f:
                     await context.add_cookies(json.load(f))
             else:
-                print("[poster] No cookies found — cannot post.")
-                await browser.close()
-                return False
-
-            page = await context.new_page()
+                print("[poster] No cookies found — performing initial login...")
+                page = await context.new_page()
+                await _async_login(context, page)
+            else:
+                page = await context.new_page()
             # ── Navigate to the post ───────────────────────────────────
             await page.goto(post_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(3, 5))
