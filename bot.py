@@ -39,6 +39,13 @@ class _HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+    def do_POST(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
     def log_message(self, *args):
         pass
 
