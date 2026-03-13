@@ -5,7 +5,6 @@ On PythonAnywhere: $PORT is not set, health server is skipped.
 """
 
 import asyncio, os, random, uuid, requests, threading
-
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -25,6 +24,7 @@ from db import (
     log_target_comment_version, log_target_final,
     log_news_created, log_news_draft_added, log_news_action,
     get_pending_target,
+    save_pending_post,
 )
 from dotenv import load_dotenv
 
@@ -79,11 +79,32 @@ def trigger_scraper(target_count: int) -> bool:
     return False
 
 
+def trigger_poster(post_id: str) -> bool:
+    """Trigger GitHub Actions post_comment job."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        print("[bot] GITHUB_TOKEN or GITHUB_REPO not set")
+        return False
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/dispatches"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    payload = {
+        "event_type": "post_comment",
+        "client_payload": {"post_id": post_id},
+    }
+    r = requests.post(url, json=payload, headers=headers, timeout=10)
+    if r.status_code == 204:
+        return True
+    print(f"[bot] GitHub poster dispatch failed: {r.status_code} {r.text}")
+    return False
+
+
 # ── State ─────────────────────────────────────────────────────────────────────
 pending_targets    = {}
 ready_comments     = {}
 ready_news         = {}
-approved_queue     = asyncio.Queue()
 is_scanning        = False
 chat_id            = None
 total_approved     = 0
@@ -352,11 +373,31 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log_target_action(log_id, "queued")
                 log_target_final(log_id, "queued", comment_data["draft"])
             except Exception as e: print(f"[bot] log error: {e}")
-        await approved_queue.put(comment_data)
-        await query.edit_message_text(
-            f"👤 {comment_data.get('author_name','Unknown')} — {comment_data.get('author_title','')}\n\n"
-            f"💬 Your comment:\n{comment_data['draft'][:300]}\n\n📤 Queued for posting."
-        )
+
+        import uuid as _uuid
+        post_id = str(_uuid.uuid4())[:8]
+        try:
+            save_pending_post(
+                post_id=post_id,
+                url=comment_data["url"],
+                comment=comment_data["draft"],
+                author_name=comment_data.get("author_name", ""),
+                log_id=log_id,
+            )
+        except Exception as e:
+            print(f"[bot] save_pending_post error: {e}")
+            await query.edit_message_text("❌ Failed to save post data. Try again.")
+            return
+
+        ok = trigger_poster(post_id)
+        if ok:
+            await query.edit_message_text(
+                f"👤 {comment_data.get('author_name','Unknown')} — {comment_data.get('author_title','')}\n\n"
+                f"💬 Your comment:\n{comment_data['draft'][:300]}\n\n"
+                f"🚀 Posting via GitHub Actions (~1-2 min)..."
+            )
+        else:
+            await query.edit_message_text("❌ Failed to trigger poster job. Check GITHUB_TOKEN.")
 
     elif data.startswith("regen_"):
         comment_id   = data[len("regen_"):]
@@ -532,72 +573,6 @@ async def _fetch_news(bot, message_id: int):
     )
 
 
-# ── Background Worker ─────────────────────────────────────────────────────────
-async def worker(app):
-    global total_posted, is_scanning
-
-    while True:
-        target_data = await approved_queue.get()
-        url     = target_data["url"]
-        comment = target_data["draft"]
-        author  = target_data.get("author_name", "Unknown")
-
-        if daily_limit_reached():
-            if chat_id:
-                await app.bot.send_message(chat_id=chat_id,
-                    text="🛑 Daily limit (10) reached. Queue paused until tomorrow.")
-            await approved_queue.put(target_data)
-            await asyncio.sleep(3600)
-            continue
-
-        if chat_id:
-            await app.bot.send_message(chat_id=chat_id,
-                text=f"⏳ Posting comment on {author}'s post...")
-
-        try:
-            success = await post_comment(url, comment)
-        except Exception as e:
-            print(f"[worker] post_comment exception: {e}")
-            success = False
-
-        if success:
-            total_posted += 1
-            mark_commented(url)
-            increment_today_count()
-            is_scanning = False
-            log_id = target_data.get("log_id")
-            if log_id:
-                try:
-                    log_target_action(log_id, "posted")
-                    log_target_final(log_id, "posted", comment)
-                except Exception as e: print(f"[bot] log error: {e}")
-            save_warm_lead(
-                author_name=target_data.get("author_name",""),
-                author_title=target_data.get("author_title",""),
-                post_snippet=target_data.get("text","")[:300],
-                comment=comment,
-            )
-            if chat_id:
-                await app.bot.send_message(chat_id=chat_id,
-                    text=f"✅ Comment {total_posted} posted on {author}'s post!\n"
-                         f"📊 Queue: {approved_queue.qsize()} remaining.")
-        else:
-            if chat_id:
-                await app.bot.send_message(chat_id=chat_id,
-                    text=f"❌ Failed to post on {author}'s post.")
-
-        approved_queue.task_done()
-
-        if not approved_queue.empty():
-            wait = random.randint(300, 600)
-            if chat_id:
-                await app.bot.send_message(chat_id=chat_id,
-                    text=f"⏰ Waiting {wait//60}m {wait%60}s before next...")
-            await asyncio.sleep(wait)
-        elif chat_id and total_posted > 0:
-            await app.bot.send_message(chat_id=chat_id,
-                text=f"🏁 All done! Posted {total_posted} comments.\nSend /start_cron for next round.")
-
 
 # ── /cancel ───────────────────────────────────────────────────────────────────
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -629,29 +604,16 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     waiting_for_rephrase_comment_id         = None
     waiting_for_rephrase_comment_message_id = None
 
-    cleared = 0
-    while not approved_queue.empty():
-        try:
-            approved_queue.get_nowait()
-            cleared += 1
-        except asyncio.QueueEmpty:
-            break
-
     pending_targets.clear()
     ready_comments.clear()
     ready_news.clear()
     total_approved = 0
     total_posted   = 0
 
-    await update.message.reply_text(
-        f"🛑 Stopped. Cleared {cleared} queued items.\nSend /start_cron to start again."
-    )
+    await update.message.reply_text("🛑 Stopped. Queue cleared.\nSend /start_cron to start again.")
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
-async def post_init(app):
-    asyncio.create_task(worker(app))
-
 
 if __name__ == "__main__":
     # Start health server only if PORT is set (i.e. running on Koyeb)
@@ -662,7 +624,6 @@ if __name__ == "__main__":
     app = (
         ApplicationBuilder()
         .token(os.environ["TELEGRAM_TOKEN"])
-        .post_init(post_init)
         .build()
     )
     app.add_handler(CommandHandler("start_cron", start_cron))

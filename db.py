@@ -6,6 +6,7 @@ Collections:
   - daily_count      : 10 comments/day limit
   - activity_logs    : full audit trail
   - pending_targets  : cross-process handoff (GitHub Actions → Koyeb bot)
+  - li_session       : LinkedIn cookies (shared across all Playwright jobs)
 """
 
 from pymongo import MongoClient
@@ -29,6 +30,29 @@ def get_db():
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+# ── LinkedIn session cookies ──────────────────────────────────────────────────
+
+def save_cookies(cookies: list):
+    """Save LinkedIn cookies to MongoDB. Called after every successful session."""
+    db = get_db()
+    db.li_session.replace_one(
+        {"_id": "linkedin_cookies"},
+        {"_id": "linkedin_cookies", "cookies": cookies, "saved_at": _now()},
+        upsert=True,
+    )
+    print(f"[db] Saved {len(cookies)} LinkedIn cookies to MongoDB.")
+
+def get_cookies() -> list:
+    """Retrieve LinkedIn cookies from MongoDB. Returns [] if none saved."""
+    db  = get_db()
+    doc = db.li_session.find_one({"_id": "linkedin_cookies"})
+    if doc:
+        print(f"[db] Loaded {len(doc['cookies'])} LinkedIn cookies from MongoDB.")
+        return doc["cookies"]
+    print("[db] No LinkedIn cookies in MongoDB.")
+    return []
 
 
 # ── Pending targets (GitHub Actions → bot.py handoff) ────────────────────────
@@ -60,6 +84,35 @@ def get_pending_target(target_id: str) -> dict:
     if doc:
         doc.pop("_id", None)
         db.pending_targets.delete_one({"target_id": target_id})
+    return doc
+
+
+# ── Pending posts (bot.py → poster_job.py handoff) ───────────────────────────
+
+def save_pending_post(post_id: str, url: str, comment: str,
+                      author_name: str, log_id: str = None):
+    """bot.py saves confirmed comments here. poster_job.py reads on run."""
+    db = get_db()
+    db.pending_posts.replace_one(
+        {"post_id": post_id},
+        {
+            "post_id":     post_id,
+            "url":         url,
+            "comment":     comment,
+            "author_name": author_name,
+            "log_id":      log_id,
+            "created_at":  _now(),
+        },
+        upsert=True,
+    )
+
+def get_pending_post(post_id: str) -> dict:
+    """poster_job.py calls this. Returns post data and deletes from DB."""
+    db  = get_db()
+    doc = db.pending_posts.find_one({"post_id": post_id})
+    if doc:
+        doc.pop("_id", None)
+        db.pending_posts.delete_one({"post_id": post_id})
     return doc
 
 
