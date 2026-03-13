@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 echo "-----> Installing Playwright Chromium..."
+export PLAYWRIGHT_BROWSERS_PATH=/workspace/.playwright
 python3 -m playwright install chromium
-python3 -m playwright install-deps chromium
 echo "-----> Playwright Chromium installed."
