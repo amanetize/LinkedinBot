@@ -85,12 +85,12 @@ async def post_comment(post_url: str, comment_text: str) -> bool:
             if os.path.exists(COOKIES_PATH):
                 with open(COOKIES_PATH, "r") as f:
                     await context.add_cookies(json.load(f))
+                page = await context.new_page()
             else:
                 print("[poster] No cookies found — performing initial login...")
                 page = await context.new_page()
                 await _async_login(context, page)
-            else:
-                page = await context.new_page()
+            
             # ── Navigate to the post ───────────────────────────────────
             await page.goto(post_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(3, 5))
@@ -216,8 +216,11 @@ async def scrape_comments(post_url: str, max_comments: int = 15) -> list:
             if os.path.exists(COOKIES_PATH):
                 with open(COOKIES_PATH, "r") as f:
                     await context.add_cookies(json.load(f))
-
-            page = await context.new_page()
+                page = await context.new_page()
+            else:
+                print("[poster] No cookies found — performing initial login...")
+                page = await context.new_page()
+                await _async_login(context, page)
             await page.goto(post_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(4, 6))
 
