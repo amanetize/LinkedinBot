@@ -167,50 +167,66 @@ All data is stored in MongoDB database `linkedin_bot`. See [COLLECTIONS.md](COLL
 - **Target logs**: raw post, URL, author, why selected, Telegram message, all comment versions, each action (approve/skip/post/drop), final comment
 - **News logs**: raw Tavily search, all drafts (fetch/rephrase), Telegram messages, actions, final posted content
 
-## 9. Netlify Webhook Deployment (serverless)
+## 9. Production Deployment (Koyeb + GitHub Actions + UptimeRobot)
 
-Netlify Functions can host a limited webhook entry point for Telegram commands. This is not a full 24/7 scanning solution; for that use a Docker VM host (Render, Fly, Heroku, etc.).
+Your production stack is:
+- **Koyeb**: runs the Telegram bot process (`python3 bot.py`) continuously for scanning + posting.
+- **GitHub Actions**: runs Playwright scripts as cron jobs for supplemental scraping or maintenance tasks.
+- **MongoDB**: shared state and audit log, deduplication and daily limits.
+- **UptimeRobot**: pings the Koyeb bot endpoint every 5 minutes to maintain session uptime.
 
-### Quick Start: Netlify Webhook
+### Quick Start: Koyeb Bot
 
-**Prerequisites:**
-- GitHub account with this repo pushed
-- Netlify account: [netlify.com](https://www.netlify.com)
-- MongoDB Atlas (free tier M0 cluster): [mongodb.com/cloud/atlas](https://www.mongodb.com/cloud/atlas)
+1. Create a service on Koyeb, repository connection to this project.
+2. Set environment variables in Koyeb Dashboard:
+   - `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`
+   - `LI_EMAIL`, `LI_PASSWORD`
+   - `GROQ_API_KEY`, `TAVILY_API_KEY`
+   - `MONGO_URI`
+3. Use launch command: `python3 bot.py`.
+4. Ensure `runtime.txt` or `Dockerfile` uses Python 3.11+.
+5. Deploy and verify in Koyeb logs: `🤖 Bot is running. Commands: /start_cron, /post_news, /stop`.
 
-**Steps:**
+### GitHub Actions (Playwright schedule)
 
-#### 1. Create MongoDB on Atlas (if not done)
+Create `.github/workflows/playwright.yml` with schedule (e.g., daily):
 
-```bash
-# Go to MongoDB Atlas
-# → Create free M0 shared cluster
-# → Set network access to 0.0.0.0/0 (allows any IP)
-# → Create database user (username/password)
-# → Copy connection string:
-# mongodb+srv://username:password@cluster.mongodb.net/linkedin_bot?retryWrites=true&w=majority
+```yaml
+name: Playwright maintenance
+on:
+  schedule:
+    - cron: '0 3 * * *' # daily at 03:00 UTC
+jobs:
+  run-playwright:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: playwright install --with-deps chromium
+      - run: python path/to/playwright_script.py
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          LI_EMAIL: ${{ secrets.LI_EMAIL }}
+          LI_PASSWORD: ${{ secrets.LI_PASSWORD }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
 ```
 
-#### 2. Deploy as Netlify Function (Webhook)
+### UptimeRobot
 
-Netlify Functions are designed for short-running HTTP requests and are not suitable for persistent browser scanning. This section covers the webhook entrypoint and command handling you can run on Netlify.
+1. Sign up at [uptimerobot.com](https://uptimerobot.com).
+2. Create HTTP monitor:
+   - URL: `https://<koyeb-service-url>/` (or a health endpoint implemented in `bot.py` if needed).
+   - Interval: 5 min.
+3. If monitor detects downtime, it will alert and restart your bot automatically.
 
-1. Sign up at https://www.netlify.com and connect your GitHub repo.
-2. Ensure your repo contains:
-   - netlify.toml
-   - netlify/functions/telegram_webhook.py
-3. Configure environment variables in Netlify site settings with your bot keys.
-4. Deploy and note function URL: https://YOUR_NETLIFY_SITE.netlify.app/.netlify/functions/telegram_webhook
-5. Set Telegram webhook:
-   curl -X POST "https://api.telegram.org/bot<TELEGRAM_TOKEN>/setWebhook?url=https://YOUR_NETLIFY_SITE.netlify.app/.netlify/functions/telegram_webhook"
+### Test Your Deployment
 
-#### 3. Test It
-
-Send /help or /post_news to the bot. /start_cron and /stop are not supported in Netlify mode (requires long-lived background process).
-
-#### 4. Recommended full-host deployment
-
-For full feed-scanning and LinkedIn posting, deploy on a VM/container host (Render, Fly.io, Heroku, etc.).
+- `/start_cron` from Telegram should initiate scan.
+- `/post_news` should produce a draft news item.
+- Bot should log actions in MongoDB.
 
 ## 10. Running Locally
 
