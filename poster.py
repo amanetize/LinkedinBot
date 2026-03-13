@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Point Playwright to the workspace cache so it survives on Koyeb
+os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/workspace/.playwright'
+
 COOKIES_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "li_cookies.json")
 SCREENSHOTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_screenshots")
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
