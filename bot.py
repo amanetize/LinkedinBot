@@ -553,7 +553,11 @@ async def worker(app):
             await app.bot.send_message(chat_id=chat_id,
                 text=f"⏳ Posting comment on {author}'s post...")
 
-        success = await post_comment(url, comment)
+        try:
+            success = await post_comment(url, comment)
+        except Exception as e:
+            print(f"[worker] post_comment exception: {e}")
+            success = False
 
         if success:
             total_posted += 1

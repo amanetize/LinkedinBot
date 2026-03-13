@@ -67,28 +67,29 @@ async def post_comment(post_url: str, comment_text: str) -> bool:
     Returns True on success, False on failure.
     """
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = await browser.new_context(
-            viewport={"width": 1440, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/123.0.0.0 Safari/537.36"
-            ),
-        )
-
-        # Load cookies
-        if os.path.exists(COOKIES_PATH):
-            with open(COOKIES_PATH, "r") as f:
-                await context.add_cookies(json.load(f))
-        else:
-            print("[poster] No cookies found — cannot post.")
-            await browser.close()
-            return False
-
-        page = await context.new_page()
-
+        browser = None
+        page = None
         try:
+            browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+            context = await browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0.0.0 Safari/537.36"
+                ),
+            )
+
+            # Load cookies
+            if os.path.exists(COOKIES_PATH):
+                with open(COOKIES_PATH, "r") as f:
+                    await context.add_cookies(json.load(f))
+            else:
+                print("[poster] No cookies found — cannot post.")
+                await browser.close()
+                return False
+
+            page = await context.new_page()
             # ── Navigate to the post ───────────────────────────────────
             await page.goto(post_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(3, 5))
@@ -182,11 +183,13 @@ async def post_comment(post_url: str, comment_text: str) -> bool:
 
         except Exception as e:
             print(f"[poster] ✗ Error: {e}")
-            try:
-                await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, "poster_error.png"))
-            except Exception:
-                pass
-            await browser.close()
+            if page:
+                try:
+                    await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, "poster_error.png"))
+                except Exception:
+                    pass
+            if browser:
+                await browser.close()
             return False
 
 
@@ -196,23 +199,24 @@ async def scrape_comments(post_url: str, max_comments: int = 15) -> list:
     Returns a list of comment strings. Returns [] on failure.
     """
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = await browser.new_context(
-            viewport={"width": 1440, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/123.0.0.0 Safari/537.36"
-            ),
-        )
-
-        if os.path.exists(COOKIES_PATH):
-            with open(COOKIES_PATH, "r") as f:
-                await context.add_cookies(json.load(f))
-
-        page = await context.new_page()
-
+        browser = None
+        page = None
         try:
+            browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+            context = await browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0.0.0 Safari/537.36"
+                ),
+            )
+
+            if os.path.exists(COOKIES_PATH):
+                with open(COOKIES_PATH, "r") as f:
+                    await context.add_cookies(json.load(f))
+
+            page = await context.new_page()
             await page.goto(post_url, wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(4, 6))
 
@@ -286,27 +290,29 @@ async def create_post(post_content: str) -> bool:
     Returns True on success, False on failure.
     """
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = await browser.new_context(
-            viewport={"width": 1440, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/123.0.0.0 Safari/537.36"
-            ),
-        )
-
-        if os.path.exists(COOKIES_PATH):
-            with open(COOKIES_PATH, "r") as f:
-                await context.add_cookies(json.load(f))
-        else:
-            print("[poster] No cookies found — cannot post.")
-            await browser.close()
-            return False
-
-        page = await context.new_page()
-
+        browser = None
+        page = None
         try:
+            browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+            context = await browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0.0.0 Safari/537.36"
+                ),
+            )
+
+            if os.path.exists(COOKIES_PATH):
+                with open(COOKIES_PATH, "r") as f:
+                    await context.add_cookies(json.load(f))
+            else:
+                print("[poster] No cookies found — cannot post.")
+                if browser:
+                    await browser.close()
+                return False
+
+            page = await context.new_page()
             await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(4, 6))
 
@@ -408,11 +414,13 @@ async def create_post(post_content: str) -> bool:
 
         except Exception as e:
             print(f"[poster] ✗ Post creation error: {e}")
-            try:
-                await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, "create_post_error.png"))
-            except Exception:
-                pass
-            await browser.close()
+            if page:
+                try:
+                    await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, "create_post_error.png"))
+                except Exception:
+                    pass
+            if browser:
+                await browser.close()
             return False
 
 
