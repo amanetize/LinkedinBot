@@ -36,7 +36,10 @@ def _clean_post_text_for_display(raw_text: str, author_name: str = "", author_ti
     """
     if not raw_text or len(raw_text) < 20:
         return raw_text
-    text = raw_text.strip()
+
+    # Normalize early so regex handling is easier
+    text = " ".join(raw_text.strip().split())
+
     # Remove feed chrome phrases only (exact phrases so we don't strip content)
     for phrase in (
         "Feed postSuggested",
@@ -47,19 +50,36 @@ def _clean_post_text_for_display(raw_text: str, author_name: str = "", author_ti
         if text.lower().startswith(phrase.lower()):
             text = text[len(phrase):].lstrip()
         text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
-    # Content usually starts after "Xd • Edited? • Follow" (e.g. "1d • Edited • Follow")
-    m = re.search(r"\d+d\s*•\s*(?:Edited\s*•\s*)?Follow\s*", text, re.IGNORECASE)
-    if m:
-        text = text[m.end():].strip()
-    # Strip leading "2ndAuthor" / "1stAuthor" style (ordinal + author)
+
+    # Remove leading timestamps / follow markers or common preamble forms
+    text = re.sub(r"^(?:\d+\s*[dhm]?\s*•\s*|\d+d\s*•\s*(?:Edited\s*•\s*)?Follow\s*)", "", text, flags=re.IGNORECASE)
+
+    # Strip ordinal prefix (1st/2nd/3rd/4th etc) and author hints
     text = re.sub(r"^(?:1st|2nd|3rd|\d+th)\s*", "", text, flags=re.IGNORECASE)
-    # Strip repeated author name and title from start
+
     if author_name:
-        for pattern in (rf"^{re.escape(author_name)}\s*[•·]\s*", rf"^{re.escape(author_name)}\s+"):
+        safe_author = re.escape(author_name)
+        patterns = [
+            rf"^{safe_author}\s*(?:,|·|•|[-])\s*",
+            rf"^{safe_author}\s+",
+            rf"^(?:1st|2nd|3rd|\d+th)\s*{safe_author}\s*(?:,|·|•|[-])?\s*",
+            rf"^(?:1st|2nd|3rd|\d+th){safe_author}\s*(?:,|·|•|[-])?\s*",
+        ]
+        for pattern in patterns:
             text = re.sub(pattern, "", text, flags=re.IGNORECASE)
-    if author_title and len(author_title) > 5 and text.startswith(author_title[:40]):
-        text = text[len(author_title):].lstrip()
-    # Normalize whitespace
+
+    if author_title and len(author_title) > 5:
+        safe_title = re.escape(author_title)
+        text = re.sub(rf"^{safe_title}\s*(?:,|·|•|[-])?\s*", "", text, flags=re.IGNORECASE)
+
+    # Remove repeated author + title prefix in the form "Name • Title" at beginning
+    if author_name and author_title:
+        candidate_re = rf"^{re.escape(author_name)}\s*[•·]\s*{re.escape(author_title)}"
+        match = re.match(candidate_re, text, flags=re.IGNORECASE)
+        if match:
+            text = text[match.end():].lstrip()
+
+    # Normalize whitespace and return fallback to raw_text if empty
     text = " ".join(text.split())
     return text.strip() if text else raw_text
 

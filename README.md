@@ -206,7 +206,9 @@ Submit issues or PRs to improve the bot.
 
 ## License
 
-[Your license here]
+MIT License
+
+This project is released under the MIT License. See [LICENSE](LICENSE) for full terms and conditions.
 
 ---
 
