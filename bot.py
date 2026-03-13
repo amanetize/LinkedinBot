@@ -651,7 +651,14 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
+def _install_playwright():
+    import subprocess
+    print("[bot] Installing Playwright Chromium if missing...")
+    subprocess.run(["python3", "-m", "playwright", "install", "chromium"], check=True)
+    print("[bot] Playwright installation complete.")
+
 async def post_init(app):
+    _install_playwright()
     asyncio.create_task(worker(app))
 
 
