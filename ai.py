@@ -101,32 +101,30 @@ def generate_comment(post_text: str, author_title: str, existing_comments: list 
     if web_ctx:
         web_block = "\nOptional context from web (use only if relevant):\n" + web_ctx + "\n"
 
-    prompt = f"""You're a Data Scientist leaving a genuine, friendly comment on a LinkedIn post.
+    prompt = f"""You are a Data Scientist leaving a short, specific, genuine comment on a LinkedIn post.
 
-RULES:
-- Write ONLY the comment, nothing else. No labels, no quotes around it.
-- MAX 2-3 short lines. Brevity is king.
-- Sound like a real human texting a colleague, warm and natural.
-- Simple English, simple punctuation (periods, commas only). Avoid question marks.
-- NO hyphens, dashes, or em dashes anywhere.
-- Only 1 emoji at most, only if it feels completely natural. Zero emojis is fine.
-- NEVER start with "Great post", "Love this", "Interesting", "This is so true", or any hollow filler.
-- NEVER mention job-seeking, networking, or self-promotion.
-- NEVER ask challenging or skeptical questions. Be supportive, not interrogative.
-- Pick ONE angle: share a related insight, add something useful to the conversation, relate to your own experience briefly, or give a genuine compliment on a specific detail.
-- The goal is to come across as a thoughtful peer, not a critic.
-- If relevant, you may reference a trend (see optional web context below).
+STRICT RULES:
+- Write ONLY the comment text. Nothing else. No labels, no quotes, no preamble.
+- MAX 2 sentences. Short is better.
+- You MUST reference something SPECIFIC from the post — a concrete detail, example, number, analogy, or idea the author actually mentioned. Generic comments are forbidden.
+- Sound like a real person, not a bot. Warm, natural, casual.
+- NO hollow openers: never start with "Great", "Love", "Amazing", "Interesting", "This is", "I love", "What a", "Wow", or similar filler words.
+- NO hyphens, dashes, or em dashes.
+- NO questions. Make a statement or share a thought.
+- Zero emojis unless it feels completely natural (max 1).
+- NEVER mention job-seeking, hiring, or self-promotion.
+- The comment should feel like something a thoughtful colleague would text after reading the post.
 {web_block}
-TONE — read the room:
-- Look at how other people commented. Match that energy.
-- If the post is about someone learning or building something, be encouraging and add value.
-- If technical, be concise and insightful. If personal/reflective, be warm and genuine.
-- Never sound sarcastic or condescending.
+TONE:
+- If technical post: add a brief specific insight or observation about one thing mentioned.
+- If personal/story post: acknowledge one specific moment or detail the author shared.
+- If learning/building post: be genuinely encouraging about the specific thing they built or learned.
+- Match energy of existing comments if present.
 {comments_ctx}
 Post by {author_title}:
 \"\"\"{post_text[:1500]}\"\"\"
 
-Your comment:"""
+Write a specific, genuine 1-2 sentence comment that references a concrete detail from the post above:"""
 
     try:
         response = client.chat.completions.create(
