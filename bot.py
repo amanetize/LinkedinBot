@@ -1,6 +1,6 @@
 """
-bot.py — Works on both Koyeb (web process) and PythonAnywhere.
-On Koyeb: starts a health-check HTTP server on $PORT (required).
+bot.py — Works on both Koyeb and PythonAnywhere.
+On Koyeb: starts a health-check HTTP server on $PORT.
 On PythonAnywhere: $PORT is not set, health server is skipped.
 """
 
@@ -23,8 +23,7 @@ from db import (
     log_target_created, log_target_action,
     log_target_comment_version, log_target_final,
     log_news_created, log_news_draft_added, log_news_action,
-    get_pending_target,
-    save_pending_post,
+    get_pending_target, save_pending_post,
 )
 from dotenv import load_dotenv
 
@@ -34,21 +33,15 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")
 
 
-# ── Health-check server (Koyeb requires a web process on $PORT) ───────────────
+# ── Health-check server ───────────────────────────────────────────────────────
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
     def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
+        self.send_response(200); self.end_headers()
     def do_POST(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def log_message(self, *args):
-        pass
+        self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+    def log_message(self, *args): pass
 
 def _start_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -57,48 +50,31 @@ def _start_health_server():
     server.serve_forever()
 
 
-# ── GitHub Actions trigger ────────────────────────────────────────────────────
-def trigger_scraper(target_count: int) -> bool:
+# ── GitHub Actions triggers ───────────────────────────────────────────────────
+def _gh_dispatch(event_type: str, payload: dict) -> bool:
     if not GITHUB_TOKEN or not GITHUB_REPO:
         print("[bot] GITHUB_TOKEN or GITHUB_REPO not set")
         return False
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/dispatches"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    payload = {
-        "event_type": "run_scraper",
-        "client_payload": {"target_count": target_count},
-    }
-    r = requests.post(url, json=payload, headers=headers, timeout=10)
+    r = requests.post(
+        f"https://api.github.com/repos/{GITHUB_REPO}/dispatches",
+        json={"event_type": event_type, "client_payload": payload},
+        headers={
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=10,
+    )
     if r.status_code == 204:
         return True
-    print(f"[bot] GitHub dispatch failed: {r.status_code} {r.text}")
+    print(f"[bot] GH dispatch failed: {r.status_code} {r.text}")
     return False
 
+def trigger_scraper(target_count: int) -> bool:
+    return _gh_dispatch("run_scraper", {"target_count": target_count})
 
 def trigger_poster(post_id: str) -> bool:
-    """Trigger GitHub Actions post_comment job."""
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        print("[bot] GITHUB_TOKEN or GITHUB_REPO not set")
-        return False
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/dispatches"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    payload = {
-        "event_type": "post_comment",
-        "client_payload": {"post_id": post_id},
-    }
-    r = requests.post(url, json=payload, headers=headers, timeout=10)
-    if r.status_code == 204:
-        return True
-    print(f"[bot] GitHub poster dispatch failed: {r.status_code} {r.text}")
-    return False
+    return _gh_dispatch("post_comment", {"post_id": post_id})
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -118,177 +94,39 @@ waiting_for_rephrase_comment_id         = None
 waiting_for_rephrase_comment_message_id = None
 
 
-# ── /start_cron ───────────────────────────────────────────────────────────────
-async def start_cron(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global is_scanning, chat_id, waiting_for_count
+# ── Card builder ──────────────────────────────────────────────────────────────
+def _build_target_card(d: dict, status: str, comment: str = None) -> str:
+    """Single source of truth for target card text. Edited in-place as status changes."""
+    author   = d.get("author_name", "Unknown")
+    title    = d.get("author_title", "")
+    conn     = d.get("connection_level", "")
+    text     = (d.get("text") or "")[:300]
+    likes    = d.get("likes_count", 0)
+    cmts     = d.get("comments_count", 0)
+    reason   = d.get("reason", "")
+    idx      = d.get("target_index", "")
 
-    if is_scanning:
-        await update.message.reply_text("⚠️ A scan is already running. Send /stop first.")
-        return
-
-    chat_id = update.effective_chat.id
-
-    if context.args and context.args[0].isdigit():
-        count = min(int(context.args[0]), 20)
-        await _begin_scan(update, context, count)
-    else:
-        waiting_for_count = True
-        await update.message.reply_text("🔢 How many targets do you want? (1-20)")
-
-
-async def _begin_scan(update, context, target_count: int):
-    global is_scanning
-
-    if daily_limit_reached():
-        await update.message.reply_text("🛑 Daily comment limit (10) reached. Try again tomorrow.")
-        return
-
-    is_scanning = True
-    ok = trigger_scraper(target_count)
-    if ok:
-        await update.message.reply_text(
-            f"🚀 Scanning for {target_count} targets via GitHub Actions...\n"
-            f"Results will appear here in ~2-3 minutes."
-        )
-    else:
-        is_scanning = False
-        await update.message.reply_text(
-            "❌ Failed to trigger scraper. Check GITHUB_TOKEN and GITHUB_REPO env vars."
-        )
+    parts = [f"🎯 Target #{idx}" if idx else "🎯 Target", ""]
+    parts += [f"👤 {author}", f"💼 {title}"]
+    if conn:
+        parts.append(f"🔗 {conn} connection")
+    parts += ["", f"📝 {text}...", ""]
+    if likes or cmts:
+        parts.append(f"❤️ {likes} likes  💬 {cmts} comments")
+    parts += ["", f"📊 Status: {status}"]
+    if reason and "pending" in status.lower():
+        parts.append(f"💡 Why: {reason}")
+    if comment:
+        parts += ["", "🗨️ Your comment:", comment]
+    return "\n".join(parts)
 
 
-# ── Text handler ──────────────────────────────────────────────────────────────
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_count
-    global waiting_for_rephrase_news_id, waiting_for_rephrase_message_id
-    global waiting_for_custom_comment_id, waiting_for_custom_comment_message_id
-    global waiting_for_rephrase_comment_id, waiting_for_rephrase_comment_message_id
-
-    text = (update.message.text or "").strip()
-
-    if waiting_for_custom_comment_id is not None:
-        if text.lower() == "/cancel":
-            waiting_for_custom_comment_id = None
-            waiting_for_custom_comment_message_id = None
-            await update.message.reply_text("Cancelled.")
-            return
-        comment_id   = waiting_for_custom_comment_id
-        comment_data = ready_comments.get(comment_id)
-        if not comment_data:
-            waiting_for_custom_comment_id = None
-            waiting_for_custom_comment_message_id = None
-            await update.message.reply_text("This comment expired.")
-            return
-        message_id = waiting_for_custom_comment_message_id
-        waiting_for_custom_comment_id = None
-        waiting_for_custom_comment_message_id = None
-        comment_data["draft"] = text
-        ready_comments[comment_id] = comment_data
-        log_id = comment_data.get("log_id")
-        if log_id:
-            try: log_target_comment_version(log_id, text)
-            except Exception as e: print(f"[bot] log error: {e}")
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id, message_id=message_id,
-            text=_comment_preview_text(comment_data),
-            reply_markup=_comment_keyboard(comment_id),
-        )
-        await update.message.reply_text("✅ Custom comment set. See above.")
-        return
-
-    if waiting_for_rephrase_comment_id is not None:
-        if text.lower() == "/cancel":
-            waiting_for_rephrase_comment_id = None
-            waiting_for_rephrase_comment_message_id = None
-            await update.message.reply_text("Cancelled.")
-            return
-        comment_id   = waiting_for_rephrase_comment_id
-        comment_data = ready_comments.get(comment_id)
-        if not comment_data:
-            waiting_for_rephrase_comment_id = None
-            waiting_for_rephrase_comment_message_id = None
-            await update.message.reply_text("This comment expired.")
-            return
-        message_id = waiting_for_rephrase_comment_message_id
-        waiting_for_rephrase_comment_id = None
-        waiting_for_rephrase_comment_message_id = None
-        await update.message.reply_text("⏳ Rephrasing...")
-        loop = asyncio.get_event_loop()
-        new_draft = await loop.run_in_executor(
-            None, lambda: generate_comment_rephrase_with_instruction(comment_data.get("draft",""), text)
-        )
-        if not new_draft:
-            await update.message.reply_text("❌ Rephrase failed.")
-            return
-        comment_data["draft"] = new_draft
-        ready_comments[comment_id] = comment_data
-        log_id = comment_data.get("log_id")
-        if log_id:
-            try: log_target_comment_version(log_id, new_draft)
-            except Exception as e: print(f"[bot] log error: {e}")
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id, message_id=message_id,
-            text=_comment_preview_text(comment_data),
-            reply_markup=_comment_keyboard(comment_id),
-        )
-        await update.message.reply_text("✅ Rephrased. See above.")
-        return
-
-    if waiting_for_rephrase_news_id is not None:
-        if text.lower() == "/cancel":
-            waiting_for_rephrase_news_id = None
-            waiting_for_rephrase_message_id = None
-            await update.message.reply_text("Cancelled.")
-            return
-        news_id   = waiting_for_rephrase_news_id
-        news_data = ready_news.get(news_id)
-        if not news_data:
-            waiting_for_rephrase_news_id = None
-            waiting_for_rephrase_message_id = None
-            await update.message.reply_text("Session expired. Run /post_news again.")
-            return
-        message_id = waiting_for_rephrase_message_id
-        waiting_for_rephrase_news_id = None
-        waiting_for_rephrase_message_id = None
-        await update.message.reply_text("⏳ Rephrasing news post...")
-        loop = asyncio.get_event_loop()
-        new_content = await loop.run_in_executor(
-            None, lambda: generate_news_post_rephrase_with_instruction(
-                news_data.get("search_context",""), news_data.get("content",""), text)
-        )
-        if not new_content:
-            await update.message.reply_text("❌ Rephrase failed.")
-            return
-        news_data["content"] = new_content
-        ready_news[news_id] = news_data
-        log_id = news_data.get("log_id")
-        if log_id:
-            try: log_news_draft_added(log_id, new_content, "rephrase_instruction")
-            except Exception as e: print(f"[bot] log error: {e}")
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id, message_id=message_id,
-            text=f"📰 Draft LinkedIn Post (rephrased):\n\n{new_content}",
-            reply_markup=_news_keyboard(news_id),
-        )
-        await update.message.reply_text("✅ Rephrased. See above.")
-        return
-
-    if waiting_for_count:
-        if text.isdigit() and 1 <= int(text) <= 20:
-            waiting_for_count = False
-            await _begin_scan(update, context, int(text))
-        else:
-            await update.message.reply_text("Please send a number between 1 and 20.")
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def _comment_preview_text(d: dict) -> str:
-    return (
-        f"👤 {d.get('author_name','Unknown')} — {d.get('author_title','')}\n\n"
-        f"🔗 {d.get('url','')}\n\n"
-        f"📝 {(d.get('text') or '')[:200]}...\n\n"
-        f"💬 Your comment:\n{d.get('draft','')}"
-    )
+# ── Keyboards ─────────────────────────────────────────────────────────────────
+def _approve_keyboard(target_id: str):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Approve", callback_data=f"approve_{target_id}"),
+        InlineKeyboardButton("❌ Skip",    callback_data=f"skip_{target_id}"),
+    ]])
 
 def _comment_keyboard(comment_id: str):
     return InlineKeyboardMarkup([
@@ -316,6 +154,163 @@ def _news_keyboard(news_id: str):
     ])
 
 
+# ── /start_cron ───────────────────────────────────────────────────────────────
+async def start_cron(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global is_scanning, chat_id, waiting_for_count
+    if is_scanning:
+        await update.message.reply_text("⚠️ A scan is already running. Send /stop first.")
+        return
+    chat_id = update.effective_chat.id
+    if context.args and context.args[0].isdigit():
+        await _begin_scan(update, context, min(int(context.args[0]), 20))
+    else:
+        waiting_for_count = True
+        await update.message.reply_text("🔢 How many targets do you want? (1-20)")
+
+async def _begin_scan(update, context, target_count: int):
+    global is_scanning
+    if daily_limit_reached():
+        await update.message.reply_text("🛑 Daily comment limit (10) reached. Try again tomorrow.")
+        return
+    is_scanning = True
+    if trigger_scraper(target_count):
+        await update.message.reply_text(
+            f"🚀 Scanning for {target_count} targets via GitHub Actions...\n"
+            f"Results will appear here in ~2-3 minutes."
+        )
+    else:
+        is_scanning = False
+        await update.message.reply_text("❌ Failed to trigger scraper. Check GITHUB_TOKEN and GITHUB_REPO.")
+
+
+# ── Text handler ──────────────────────────────────────────────────────────────
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global waiting_for_count
+    global waiting_for_rephrase_news_id, waiting_for_rephrase_message_id
+    global waiting_for_custom_comment_id, waiting_for_custom_comment_message_id
+    global waiting_for_rephrase_comment_id, waiting_for_rephrase_comment_message_id
+
+    text = (update.message.text or "").strip()
+
+    # ── Custom comment input ──────────────────────────────────────────────────
+    if waiting_for_custom_comment_id is not None:
+        if text.lower() == "/cancel":
+            waiting_for_custom_comment_id = None
+            waiting_for_custom_comment_message_id = None
+            await update.message.reply_text("Cancelled.")
+            return
+        comment_id   = waiting_for_custom_comment_id
+        comment_data = ready_comments.get(comment_id)
+        if not comment_data:
+            waiting_for_custom_comment_id = None
+            waiting_for_custom_comment_message_id = None
+            await update.message.reply_text("This comment expired.")
+            return
+        message_id = waiting_for_custom_comment_message_id
+        waiting_for_custom_comment_id = None
+        waiting_for_custom_comment_message_id = None
+        comment_data["draft"] = text
+        ready_comments[comment_id] = comment_data
+        log_id = comment_data.get("log_id")
+        if log_id:
+            try: log_target_comment_version(log_id, text)
+            except Exception as e: print(f"[bot] log error: {e}")
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id, message_id=message_id,
+            text=_build_target_card(comment_data, "💬 Comment ready", text),
+            reply_markup=_comment_keyboard(comment_id),
+        )
+        await update.message.reply_text("✅ Custom comment set. See above.")
+        return
+
+    # ── Rephrase comment input ────────────────────────────────────────────────
+    if waiting_for_rephrase_comment_id is not None:
+        if text.lower() == "/cancel":
+            waiting_for_rephrase_comment_id = None
+            waiting_for_rephrase_comment_message_id = None
+            await update.message.reply_text("Cancelled.")
+            return
+        comment_id   = waiting_for_rephrase_comment_id
+        comment_data = ready_comments.get(comment_id)
+        if not comment_data:
+            waiting_for_rephrase_comment_id = None
+            waiting_for_rephrase_comment_message_id = None
+            await update.message.reply_text("This comment expired.")
+            return
+        message_id = waiting_for_rephrase_comment_message_id
+        waiting_for_rephrase_comment_id = None
+        waiting_for_rephrase_comment_message_id = None
+        await update.message.reply_text("⏳ Rephrasing...")
+        loop = asyncio.get_event_loop()
+        new_draft = await loop.run_in_executor(
+            None, lambda: generate_comment_rephrase_with_instruction(comment_data.get("draft", ""), text)
+        )
+        if not new_draft:
+            await update.message.reply_text("❌ Rephrase failed.")
+            return
+        comment_data["draft"] = new_draft
+        ready_comments[comment_id] = comment_data
+        log_id = comment_data.get("log_id")
+        if log_id:
+            try: log_target_comment_version(log_id, new_draft)
+            except Exception as e: print(f"[bot] log error: {e}")
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id, message_id=message_id,
+            text=_build_target_card(comment_data, "💬 Comment ready", new_draft),
+            reply_markup=_comment_keyboard(comment_id),
+        )
+        await update.message.reply_text("✅ Rephrased. See above.")
+        return
+
+    # ── Rephrase news input ───────────────────────────────────────────────────
+    if waiting_for_rephrase_news_id is not None:
+        if text.lower() == "/cancel":
+            waiting_for_rephrase_news_id = None
+            waiting_for_rephrase_message_id = None
+            await update.message.reply_text("Cancelled.")
+            return
+        news_id   = waiting_for_rephrase_news_id
+        news_data = ready_news.get(news_id)
+        if not news_data:
+            waiting_for_rephrase_news_id = None
+            waiting_for_rephrase_message_id = None
+            await update.message.reply_text("Session expired. Run /post_news again.")
+            return
+        message_id = waiting_for_rephrase_message_id
+        waiting_for_rephrase_news_id = None
+        waiting_for_rephrase_message_id = None
+        await update.message.reply_text("⏳ Rephrasing news post...")
+        loop = asyncio.get_event_loop()
+        new_content = await loop.run_in_executor(
+            None, lambda: generate_news_post_rephrase_with_instruction(
+                news_data.get("search_context", ""), news_data.get("content", ""), text)
+        )
+        if not new_content:
+            await update.message.reply_text("❌ Rephrase failed.")
+            return
+        news_data["content"] = new_content
+        ready_news[news_id] = news_data
+        log_id = news_data.get("log_id")
+        if log_id:
+            try: log_news_draft_added(log_id, new_content, "rephrase_instruction")
+            except Exception as e: print(f"[bot] log error: {e}")
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id, message_id=message_id,
+            text=f"📰 Draft LinkedIn Post (rephrased):\n\n{new_content}",
+            reply_markup=_news_keyboard(news_id),
+        )
+        await update.message.reply_text("✅ Rephrased. See above.")
+        return
+
+    # ── Target count input ────────────────────────────────────────────────────
+    if waiting_for_count:
+        if text.isdigit() and 1 <= int(text) <= 20:
+            waiting_for_count = False
+            await _begin_scan(update, context, int(text))
+        else:
+            await update.message.reply_text("Please send a number between 1 and 20.")
+
+
 # ── Button handler ────────────────────────────────────────────────────────────
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global total_approved, is_scanning
@@ -327,9 +322,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data  = query.data
 
+    # ── Approve ───────────────────────────────────────────────────────────────
     if data.startswith("approve_"):
         target_id   = data[len("approve_"):]
-        # Check in-memory first (local scan), then MongoDB (GitHub Actions scan)
         target_data = pending_targets.pop(target_id, None)
         if not target_data:
             try:
@@ -345,13 +340,19 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: log_target_action(log_id, "approve")
             except Exception as e: print(f"[bot] log error: {e}")
         await query.edit_message_text(
-            f"✅ Approved #{total_approved} — {target_data['author_name']}\n⏳ Generating comment..."
+            _build_target_card(target_data, "✅ Approved — generating comment..."),
         )
         asyncio.create_task(_prepare_comment(context.bot, target_data, query.message.message_id))
 
+    # ── Skip ──────────────────────────────────────────────────────────────────
     elif data.startswith("skip_"):
         target_id   = data[len("skip_"):]
         target_data = pending_targets.pop(target_id, None)
+        if not target_data:
+            try:
+                target_data = get_pending_target(target_id)
+            except Exception:
+                pass
         if target_data:
             log_id = target_data.get("log_id")
             if log_id:
@@ -359,8 +360,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     log_target_action(log_id, "skip")
                     log_target_final(log_id, "skipped")
                 except Exception as e: print(f"[bot] log error: {e}")
-        await query.edit_message_text("❌ Skipped.")
+            await query.edit_message_text(
+                _build_target_card(target_data, "❌ Skipped"),
+            )
+        else:
+            await query.edit_message_text("❌ Skipped.")
 
+    # ── Confirm (Post) ────────────────────────────────────────────────────────
     elif data.startswith("confirm_"):
         comment_id   = data[len("confirm_"):]
         comment_data = ready_comments.pop(comment_id, None)
@@ -374,8 +380,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log_target_final(log_id, "queued", comment_data["draft"])
             except Exception as e: print(f"[bot] log error: {e}")
 
-        import uuid as _uuid
-        post_id = str(_uuid.uuid4())[:8]
+        post_id = str(uuid.uuid4())[:8]
         try:
             save_pending_post(
                 post_id=post_id,
@@ -383,31 +388,43 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 comment=comment_data["draft"],
                 author_name=comment_data.get("author_name", ""),
                 log_id=log_id,
+                message_id=query.message.message_id,
+                author_title=comment_data.get("author_title", ""),
+                connection_level=comment_data.get("connection_level", ""),
+                likes_count=comment_data.get("likes_count", 0),
+                comments_count=comment_data.get("comments_count", 0),
+                text=comment_data.get("text", ""),
+                target_index=str(comment_data.get("target_index", "")),
             )
         except Exception as e:
             print(f"[bot] save_pending_post error: {e}")
             await query.edit_message_text("❌ Failed to save post data. Try again.")
             return
 
-        ok = trigger_poster(post_id)
-        if ok:
+        if trigger_poster(post_id):
             await query.edit_message_text(
-                f"👤 {comment_data.get('author_name','Unknown')} — {comment_data.get('author_title','')}\n\n"
-                f"💬 Your comment:\n{comment_data['draft'][:300]}\n\n"
-                f"🚀 Posting via GitHub Actions (~1-2 min)..."
+                _build_target_card(
+                    comment_data,
+                    "🚀 Posting via GitHub Actions (~1-2 min)...",
+                    comment_data["draft"],
+                ),
             )
         else:
             await query.edit_message_text("❌ Failed to trigger poster job. Check GITHUB_TOKEN.")
 
+    # ── Regenerate ────────────────────────────────────────────────────────────
     elif data.startswith("regen_"):
         comment_id   = data[len("regen_"):]
         comment_data = ready_comments.pop(comment_id, None)
         if not comment_data:
             await query.edit_message_text("⚠️ This comment has expired.")
             return
-        await query.edit_message_text("🔄 Regenerating comment...")
+        await query.edit_message_text(
+            _build_target_card(comment_data, "🔄 Regenerating comment..."),
+        )
         asyncio.create_task(_prepare_comment(context.bot, comment_data, query.message.message_id))
 
+    # ── Custom comment ────────────────────────────────────────────────────────
     elif data.startswith("customcomment_"):
         comment_id   = data[len("customcomment_"):]
         comment_data = ready_comments.get(comment_id)
@@ -416,8 +433,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         waiting_for_custom_comment_id         = comment_id
         waiting_for_custom_comment_message_id = query.message.message_id
-        await query.edit_message_text("📝 Send your own comment. /cancel to cancel.")
+        await query.edit_message_text(
+            _build_target_card(comment_data, "📝 Waiting for your comment..."),
+        )
 
+    # ── Rephrase comment ──────────────────────────────────────────────────────
     elif data.startswith("repcomment_"):
         comment_id   = data[len("repcomment_"):]
         comment_data = ready_comments.get(comment_id)
@@ -426,8 +446,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         waiting_for_rephrase_comment_id         = comment_id
         waiting_for_rephrase_comment_message_id = query.message.message_id
-        await query.edit_message_text("✏️ Send rephrase instruction. /cancel to cancel.")
+        await query.edit_message_text(
+            _build_target_card(comment_data, "✏️ Waiting for rephrase instruction...", comment_data.get("draft")),
+        )
 
+    # ── Drop comment ──────────────────────────────────────────────────────────
     elif data.startswith("drop_"):
         comment_id   = data[len("drop_"):]
         comment_data = ready_comments.pop(comment_id, None)
@@ -438,8 +461,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     log_target_action(log_id, "drop")
                     log_target_final(log_id, "dropped")
                 except Exception as e: print(f"[bot] log error: {e}")
-        await query.edit_message_text("🗑 Dropped.")
+            await query.edit_message_text(
+                _build_target_card(comment_data, "🗑 Dropped"),
+            )
+        else:
+            await query.edit_message_text("🗑 Dropped.")
 
+    # ── News: Post ────────────────────────────────────────────────────────────
     elif data.startswith("postnews_"):
         news_id   = data[len("postnews_"):]
         news_data = ready_news.pop(news_id, None)
@@ -451,6 +479,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⏳ Publishing to LinkedIn...")
         asyncio.create_task(_publish_news(context.bot, content, query.message.message_id, log_id))
 
+    # ── News: Rephrase ────────────────────────────────────────────────────────
     elif data.startswith("repnews_"):
         news_id   = data[len("repnews_"):]
         news_data = ready_news.get(news_id)
@@ -461,12 +490,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_for_rephrase_message_id = query.message.message_id
         await query.edit_message_text("✏️ Send rephrase instruction. /cancel to cancel.")
 
+    # ── News: Fetch again ─────────────────────────────────────────────────────
     elif data.startswith("fetchnews_"):
         news_id = data[len("fetchnews_"):]
         ready_news.pop(news_id, None)
         await query.edit_message_text("🔃 Fetching fresh news...")
         asyncio.create_task(_fetch_news(context.bot, query.message.message_id))
 
+    # ── News: Drop ────────────────────────────────────────────────────────────
     elif data.startswith("dropnews_"):
         news_id   = data[len("dropnews_"):]
         news_data = ready_news.pop(news_id, None)
@@ -483,7 +514,7 @@ async def post_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_id
     chat_id = update.effective_chat.id
     await update.message.reply_text("🔍 Searching latest AI news...")
-    loop = asyncio.get_event_loop()
+    loop       = asyncio.get_event_loop()
     result     = await loop.run_in_executor(None, generate_news_post)
     content    = result.get("content", "")
     search_ctx = result.get("search_context", "")
@@ -503,12 +534,10 @@ async def post_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Comment preparation ───────────────────────────────────────────────────────
 async def _prepare_comment(bot, target_data: dict, message_id: int):
-    url          = target_data["url"]
     post_text    = target_data["text"]
     author_title = target_data.get("author_title", "Professional")
     author_name  = target_data.get("author_name", "Unknown")
 
-    # Use comments scraped during feed scan (GitHub Actions), no live scrape needed
     existing_comments = target_data.get("existing_comments", [])
     print(f"[bot] Using {len(existing_comments)} pre-scraped comments for {author_name}")
 
@@ -519,7 +548,7 @@ async def _prepare_comment(bot, target_data: dict, message_id: int):
     if not comment:
         await bot.edit_message_text(
             chat_id=chat_id, message_id=message_id,
-            text=f"❌ Failed to generate comment for {author_name}'s post.",
+            text=_build_target_card(target_data, "❌ Failed to generate comment"),
         )
         return
 
@@ -533,7 +562,7 @@ async def _prepare_comment(bot, target_data: dict, message_id: int):
 
     await bot.edit_message_text(
         chat_id=chat_id, message_id=message_id,
-        text=_comment_preview_text(ready_comments[comment_id]),
+        text=_build_target_card(ready_comments[comment_id], "💬 Comment ready", comment),
         reply_markup=_comment_keyboard(comment_id),
     )
 
@@ -547,7 +576,6 @@ async def _publish_news(bot, content: str, message_id: int, log_id=None):
         except Exception as e: print(f"[bot] log error: {e}")
     text = f"✅ Posted to LinkedIn!\n\n{content}" if success else "❌ Failed to publish."
     await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
-
 
 async def _fetch_news(bot, message_id: int):
     loop       = asyncio.get_event_loop()
@@ -571,18 +599,14 @@ async def _fetch_news(bot, message_id: int):
     )
 
 
-
 # ── /cancel ───────────────────────────────────────────────────────────────────
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_rephrase_news_id, waiting_for_rephrase_message_id
     global waiting_for_custom_comment_id, waiting_for_custom_comment_message_id
     global waiting_for_rephrase_comment_id, waiting_for_rephrase_comment_message_id
-    waiting_for_rephrase_news_id            = None
-    waiting_for_rephrase_message_id         = None
-    waiting_for_custom_comment_id           = None
-    waiting_for_custom_comment_message_id   = None
-    waiting_for_rephrase_comment_id         = None
-    waiting_for_rephrase_comment_message_id = None
+    waiting_for_rephrase_news_id = waiting_for_rephrase_message_id = None
+    waiting_for_custom_comment_id = waiting_for_custom_comment_message_id = None
+    waiting_for_rephrase_comment_id = waiting_for_rephrase_comment_message_id = None
     await update.message.reply_text("Cancelled.")
 
 
@@ -593,37 +617,23 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_custom_comment_id, waiting_for_custom_comment_message_id
     global waiting_for_rephrase_comment_id, waiting_for_rephrase_comment_message_id
 
-    is_scanning       = False
-    waiting_for_count = False
-    waiting_for_rephrase_news_id            = None
-    waiting_for_rephrase_message_id         = None
-    waiting_for_custom_comment_id           = None
-    waiting_for_custom_comment_message_id   = None
-    waiting_for_rephrase_comment_id         = None
-    waiting_for_rephrase_comment_message_id = None
-
+    is_scanning = waiting_for_count = False
+    waiting_for_rephrase_news_id = waiting_for_rephrase_message_id = None
+    waiting_for_custom_comment_id = waiting_for_custom_comment_message_id = None
+    waiting_for_rephrase_comment_id = waiting_for_rephrase_comment_message_id = None
     pending_targets.clear()
     ready_comments.clear()
     ready_news.clear()
-    total_approved = 0
-    total_posted   = 0
-
+    total_approved = total_posted = 0
     await update.message.reply_text("🛑 Stopped. Queue cleared.\nSend /start_cron to start again.")
 
 
-# ── Startup ───────────────────────────────────────────────────────────────────
-
+# ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Start health server only if PORT is set (i.e. running on Koyeb)
     if os.environ.get("PORT"):
-        health_thread = threading.Thread(target=_start_health_server, daemon=True)
-        health_thread.start()
+        threading.Thread(target=_start_health_server, daemon=True).start()
 
-    app = (
-        ApplicationBuilder()
-        .token(os.environ["TELEGRAM_TOKEN"])
-        .build()
-    )
+    app = ApplicationBuilder().token(os.environ["TELEGRAM_TOKEN"]).build()
     app.add_handler(CommandHandler("start_cron", start_cron))
     app.add_handler(CommandHandler("post_news",  post_news))
     app.add_handler(CommandHandler("stop",       stop))
