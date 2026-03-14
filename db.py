@@ -60,7 +60,11 @@ def get_cookies() -> list:
 def save_pending_target(target_id: str, url: str, text: str,
                         author_name: str, author_title: str,
                         reason: str, log_id: str = None,
-                        existing_comments: list = None):
+                        existing_comments: list = None,
+                        connection_level: str = "",
+                        likes_count: int = 0,
+                        comments_count: int = 0,
+                        target_index: int = 0):
     """scraper_job.py saves targets here. bot.py reads them on Approve."""
     db = get_db()
     db.pending_targets.replace_one(
@@ -74,6 +78,10 @@ def save_pending_target(target_id: str, url: str, text: str,
             "reason":            reason,
             "log_id":            log_id,
             "existing_comments": existing_comments or [],
+            "connection_level":  connection_level,
+            "likes_count":       likes_count,
+            "comments_count":    comments_count,
+            "target_index":      target_index,
             "created_at":        _now(),
         },
         upsert=True,
@@ -92,18 +100,29 @@ def get_pending_target(target_id: str) -> dict:
 # ── Pending posts (bot.py → poster_job.py handoff) ───────────────────────────
 
 def save_pending_post(post_id: str, url: str, comment: str,
-                      author_name: str, log_id: str = None):
+                      author_name: str, log_id: str = None,
+                      message_id: int = None, author_title: str = "",
+                      connection_level: str = "", likes_count: int = 0,
+                      comments_count: int = 0, text: str = "",
+                      target_index: str = ""):
     """bot.py saves confirmed comments here. poster_job.py reads on run."""
     db = get_db()
     db.pending_posts.replace_one(
         {"post_id": post_id},
         {
-            "post_id":     post_id,
-            "url":         url,
-            "comment":     comment,
-            "author_name": author_name,
-            "log_id":      log_id,
-            "created_at":  _now(),
+            "post_id":          post_id,
+            "url":              url,
+            "comment":          comment,
+            "author_name":      author_name,
+            "author_title":     author_title,
+            "log_id":           log_id,
+            "message_id":       message_id,
+            "connection_level": connection_level,
+            "likes_count":      likes_count,
+            "comments_count":   comments_count,
+            "text":             text,
+            "target_index":     target_index,
+            "created_at":       _now(),
         },
         upsert=True,
     )

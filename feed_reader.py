@@ -1,8 +1,9 @@
 """
 feed_reader.py — Async LinkedIn Feed Scanner
 
-Cookies loaded from MongoDB first, file as fallback.
-Saves cookies back to MongoDB after every successful session.
+Extracts: url, text, author_name, author_title, connection_level,
+          likes_count, comments_count, raw_text.
+Cookies loaded from MongoDB. Saved back after every session.
 """
 
 import os, json, asyncio, random, re
@@ -36,7 +37,7 @@ def _save_cookies_to_db(cookies: list):
         print(f"[feed] DB cookie save error: {e}")
 
 
-def _clean_post_text_for_display(raw_text: str, author_name: str = "", author_title: str = "") -> str:
+def _clean_post_text(raw_text: str, author_name: str = "", author_title: str = "") -> str:
     if not raw_text or len(raw_text) < 20:
         return raw_text
 
@@ -47,39 +48,95 @@ def _clean_post_text_for_display(raw_text: str, author_name: str = "", author_ti
             text = text[len(phrase):].lstrip()
         text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
 
-    text = re.sub(r"^(?:\d+\s*[dhm]?\s*•\s*|\d+d\s*•\s*(?:Edited\s*•\s*)?Follow\s*)", "", text, flags=re.IGNORECASE)
+    # Strip connection level prefix (1st, 2nd, 3rd)
     text = re.sub(r"^(?:1st|2nd|3rd|\d+th)\s*", "", text, flags=re.IGNORECASE)
 
-    if author_name:
-        safe_author = re.escape(author_name)
-        for pattern in [
-            rf"^{safe_author}\s*(?:,|·|•|[-])\s*",
-            rf"^{safe_author}\s+",
-            rf"^(?:1st|2nd|3rd|\d+th)\s*{safe_author}\s*(?:,|·|•|[-])?\s*",
-        ]:
-            text = re.sub(pattern, "", text, flags=re.IGNORECASE)
-
+    # Strip author title if it appears at start
     if author_title and len(author_title) > 5:
-        text = re.sub(rf"^{re.escape(author_title)}\s*(?:,|·|•|[-])?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(rf"^{re.escape(author_title)}\s*(?:[|,·•\-])?\s*", "", text, flags=re.IGNORECASE)
 
+    # Strip author name if at start
+    if author_name:
+        safe = re.escape(author_name)
+        for pat in [
+            rf"^{safe}\s*(?:[,·•\-])\s*",
+            rf"^{safe}\s+",
+            rf"^(?:1st|2nd|3rd|\d+th)\s*{safe}\s*(?:[,·•\-])?\s*",
+        ]:
+            text = re.sub(pat, "", text, flags=re.IGNORECASE)
+
+    # Strip "Name • Title" prefix
     if author_name and author_title:
-        match = re.match(rf"^{re.escape(author_name)}\s*[•·]\s*{re.escape(author_title)}", text, flags=re.IGNORECASE)
-        if match:
-            text = text[match.end():].lstrip()
+        m = re.match(rf"^{re.escape(author_name)}\s*[•·]\s*{re.escape(author_title)}", text, flags=re.IGNORECASE)
+        if m:
+            text = text[m.end():].lstrip()
+
+    # Strip timestamp/follow chrome: "1d • Follow", "2d • Edited • Follow"
+    text = re.sub(r"^\d+[dhm]\s*(?:•\s*(?:Edited\s*•\s*)?Follow\s*)?", "", text, flags=re.IGNORECASE)
 
     text = " ".join(text.split())
-    return text.strip() if text else raw_text
+    return text.strip() if len(text) > 20 else raw_text
+
+
+def _extract_connection_level(raw_text: str) -> str:
+    """Parse 1st / 2nd / 3rd from raw post text."""
+    m = re.search(r"\b(1st|2nd|3rd)\b", raw_text[:200])
+    return m.group(1) if m else ""
+
+
+async def _extract_counts(page, post_element) -> dict:
+    """Extract likes and comments counts from the post DOM element."""
+    try:
+        counts = await post_element.evaluate("""el => {
+            let likes = 0, comments = 0;
+
+            // Likes / reactions: look for social counts button
+            let likeEl = el.querySelector(
+                'button[aria-label*="reaction"] span, ' +
+                'span[data-test-id*="social-action-counts-reaction"] span, ' +
+                'button.social-counts-reactions span.social-counts-reactions__count'
+            );
+            if (!likeEl) {
+                // Fallback: any element whose text is just a number near "reaction"
+                let spans = el.querySelectorAll('span');
+                for (let s of spans) {
+                    let txt = (s.textContent || '').trim();
+                    let label = (s.getAttribute('aria-label') || '').toLowerCase();
+                    if (label.includes('reaction') && /^[\\d,]+$/.test(txt.replace(/,/g,''))) {
+                        likeEl = s; break;
+                    }
+                }
+            }
+            if (likeEl) {
+                let n = parseInt((likeEl.textContent || '').replace(/[^0-9]/g, ''));
+                if (!isNaN(n)) likes = n;
+            }
+
+            // Comments count
+            let commentBtns = el.querySelectorAll('button');
+            for (let btn of commentBtns) {
+                let label = (btn.getAttribute('aria-label') || '').toLowerCase();
+                let txt   = (btn.textContent || '').trim();
+                if (label.includes('comment') || txt.toLowerCase().includes('comment')) {
+                    let m = txt.match(/([0-9,]+)/);
+                    if (m) { comments = parseInt(m[1].replace(/,/g,'')); break; }
+                }
+            }
+            return {likes, comments};
+        }""")
+        return counts
+    except Exception as e:
+        print(f"[feed] count extraction error: {e}")
+        return {"likes": 0, "comments": 0}
 
 
 async def _async_login(context, page):
-    """Perform LinkedIn login and save fresh cookies to MongoDB."""
     email    = os.environ.get("LI_EMAIL")
     password = os.environ.get("LI_PASSWORD")
-
     if not email or not password:
         raise RuntimeError("LI_EMAIL and LI_PASSWORD must be set.")
 
-    print("[feed] Logging in with email/password...")
+    print("[feed] Logging in...")
     await page.goto("https://www.linkedin.com/login", wait_until="networkidle")
     await asyncio.sleep(random.uniform(3, 5))
 
@@ -111,7 +168,7 @@ async def _async_login(context, page):
 
     cookies = await context.cookies()
     _save_cookies_to_db(cookies)
-    print(f"[feed] ✓ Login successful, saved {len(cookies)} cookies to MongoDB.")
+    print(f"[feed] ✓ Login successful, saved {len(cookies)} cookies.")
 
 
 async def _extract_post_url(page, post_element):
@@ -119,7 +176,6 @@ async def _extract_post_url(page, post_element):
         menu_btn = post_element.locator('button[aria-label*="control menu"]')
         if await menu_btn.count() == 0:
             return ""
-
         await menu_btn.first.click()
         await asyncio.sleep(1.5)
 
@@ -128,16 +184,13 @@ async def _extract_post_url(page, post_element):
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.5)
             return ""
-
         await copy_item.first.click()
         await asyncio.sleep(1.5)
 
         toast_links = await page.evaluate("""() => {
             let alerts = document.querySelectorAll('[role="alert"] a');
             for (let a of alerts) {
-                if (a.textContent.trim().toLowerCase().includes('view post')) {
-                    return a.href;
-                }
+                if (a.textContent.trim().toLowerCase().includes('view post')) return a.href;
             }
             return '';
         }""")
@@ -148,7 +201,6 @@ async def _extract_post_url(page, post_element):
         if toast_links:
             base = toast_links.split("?")[0]
             return base + "/" if not base.endswith("/") else base
-
         return ""
 
     except Exception as e:
@@ -178,13 +230,12 @@ async def get_feed_posts(callback_func, max_targets=10):
             ),
         )
 
-        # Load cookies from MongoDB
         cookies = _load_cookies_from_db()
         if cookies:
             await context.add_cookies(cookies)
             print("[feed] Loaded cookies from MongoDB.")
         else:
-            print("[feed] No cookies in MongoDB — fresh login required.")
+            print("[feed] No cookies — fresh login required.")
 
         page = await context.new_page()
 
@@ -202,7 +253,6 @@ async def get_feed_posts(callback_func, max_targets=10):
 
             await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, "feed_loaded.png"))
 
-            # Save refreshed cookies after successful feed load
             fresh_cookies = await context.cookies()
             _save_cookies_to_db(fresh_cookies)
             print(f"[feed] ✓ Feed loaded. Cookies saved ({len(fresh_cookies)}). Starting scan...")
@@ -241,6 +291,7 @@ async def get_feed_posts(callback_func, max_targets=10):
                     if len(raw_text) < 50:
                         continue
 
+                    # ── AI Evaluation ──────────────────────────────────
                     try:
                         resp = client.chat.completions.create(
                             model="llama-3.1-8b-instant",
@@ -274,20 +325,28 @@ async def get_feed_posts(callback_func, max_targets=10):
                         print("[feed] ⚠ Could not extract URL, skipping.")
                         continue
 
+                    # ── Extract extra metadata ─────────────────────────
+                    connection_level = _extract_connection_level(raw_text)
+                    counts           = await _extract_counts(page, post)
+
                     found_count  += 1
                     author        = eval_data.get("author_name", "Unknown")
-                    author_title  = eval_data.get("author_title", "Professional")
-                    display_text  = _clean_post_text_for_display(raw_text, author, author_title)
+                    author_title  = eval_data.get("author_title", "")
+                    display_text  = _clean_post_text(raw_text, author, author_title)
                     post_text     = display_text if len(display_text) > 50 else raw_text
-                    print(f"[feed] 🎯 Target #{found_count}: {author}")
+
+                    print(f"[feed] 🎯 Target #{found_count}: {author} ({connection_level}) — {counts['likes']}❤️ {counts['comments']}💬")
 
                     await callback_func({
-                        "url":          post_url,
-                        "text":         post_text,
-                        "raw_text":     raw_text,
-                        "author_name":  author,
-                        "author_title": author_title,
-                        "reason":       eval_data.get("reason", ""),
+                        "url":              post_url,
+                        "text":             post_text,
+                        "raw_text":         raw_text,
+                        "author_name":      author,
+                        "author_title":     author_title,
+                        "connection_level": connection_level,
+                        "likes_count":      counts["likes"],
+                        "comments_count":   counts["comments"],
+                        "reason":           eval_data.get("reason", ""),
                     })
 
                     await asyncio.sleep(random.uniform(1.5, 3))

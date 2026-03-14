@@ -38,21 +38,27 @@ async def main():
         if already_commented(url):
             return
 
-        found     += 1
-        target_id  = str(uuid.uuid4())[:8]
-        author     = data.get("author_name", "Unknown")
-        title      = data.get("author_title", "")
-        reason     = data.get("reason", "N/A")
-        text       = data.get("text", "")
-        raw_text   = data.get("raw_text", text)
+        found            += 1
+        target_id         = str(uuid.uuid4())[:8]
+        author            = data.get("author_name", "Unknown")
+        title             = data.get("author_title", "")
+        reason            = data.get("reason", "N/A")
+        text              = data.get("text", "")
+        raw_text          = data.get("raw_text", text)
+        connection_level  = data.get("connection_level", "")
+        likes_count       = data.get("likes_count", 0)
+        comments_count    = data.get("comments_count", 0)
 
-        msg = (
-            f"🎯 Target #{found}\n\n"
-            f"👤 {author} — {title}\n\n"
-            f"🔗 {url}\n\n"
-            f"📝 {text[:250]}...\n\n"
-            f"💡 Why: {reason}"
-        )
+        conn_str   = f"🔗 {connection_level} connection" if connection_level else ""
+        counts_str = f"❤️ {likes_count} likes  💬 {comments_count} comments" if (likes_count or comments_count) else ""
+
+        msg_parts = [f"🎯 Target #{found}", ""]
+        msg_parts += [f"👤 {author}", f"💼 {title}"]
+        if conn_str:   msg_parts.append(conn_str)
+        msg_parts += ["", f"📝 {text[:300]}...", ""]
+        if counts_str: msg_parts.append(counts_str)
+        msg_parts += ["", f"📊 Status: ⏳ Pending", f"💡 Why: {reason}"]
+        msg = "\n".join(msg_parts)
 
         # Scrape existing comments now (GitHub Actions IP is trusted)
         existing_comments = []
@@ -78,6 +84,10 @@ async def main():
                 author_name=author, author_title=title,
                 reason=reason, log_id=log_id,
                 existing_comments=existing_comments,
+                connection_level=connection_level,
+                likes_count=likes_count,
+                comments_count=comments_count,
+                target_index=found,
             )
         except Exception as e:
             print(f"[scraper] save_pending_target error: {e}")
@@ -86,7 +96,18 @@ async def main():
             {"text": "✅ Approve", "callback_data": f"approve_{target_id}"},
             {"text": "❌ Skip",    "callback_data": f"skip_{target_id}"},
         ]]}
-        send_message(msg, reply_markup=keyboard)
+        result = send_message(msg, reply_markup=keyboard)
+        # Save message_id so bot.py can edit this message later
+        try:
+            message_id = result.get("result", {}).get("message_id")
+            if message_id:
+                from db import get_db
+                get_db().pending_targets.update_one(
+                    {"target_id": target_id},
+                    {"$set": {"message_id": message_id}}
+                )
+        except Exception as e:
+            print(f"[scraper] message_id save error: {e}")
 
     try:
         await get_feed_posts(on_target, max_targets=TARGET_COUNT)
