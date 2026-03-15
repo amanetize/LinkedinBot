@@ -20,7 +20,7 @@ def _get_tavily():
         _tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
     return _tavily_client
 
-EVAL_MODEL = "llama-3.3-70b-versatile"
+EVAL_MODEL = "openai/gpt-oss-120b"
 
 
 def _tavily_search(query: str, topic: str = "general", max_results: int = 5) -> str:
