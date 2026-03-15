@@ -30,22 +30,15 @@ def send_message(text: str, reply_markup: dict = None) -> dict:
     return r.json()
 
 
-def send_photo(photo_path: str, caption: str = "", reply_markup: dict = None) -> dict:
-    """Send a photo with optional caption and inline keyboard. Returns the API response dict."""
-    import json
-    data   = {"chat_id": TELEGRAM_CHAT_ID}
-    if caption:
-        data["caption"] = caption[:1024]   # Telegram caption limit
-    if reply_markup:
-        data["reply_markup"] = json.dumps(reply_markup)
+def send_photo(photo_path: str) -> None:
+    """Send a photo message (visual context only, no buttons)."""
     with open(photo_path, "rb") as f:
-        r = requests.post(
+        requests.post(
             f"{API_BASE}/sendPhoto",
-            data=data,
+            data={"chat_id": TELEGRAM_CHAT_ID},
             files={"photo": f},
             timeout=30,
         )
-    return r.json()
 
 
 async def main():
@@ -120,12 +113,11 @@ async def main():
             {"text": "❌ Skip",    "callback_data": f"skip_{target_id}"},
         ]]}
 
-        # Send photo + card (with Approve/Skip buttons) then delete temp file
-        message_id = None
+        # Photo is sent first for visual context (no buttons on it).
+        # Buttons live on the text card below so edit_message_text works in bot.py.
         if screenshot_path and Path(screenshot_path).exists():
             try:
-                result = send_photo(screenshot_path, caption=card_text, reply_markup=keyboard)
-                message_id = result.get("result", {}).get("message_id")
+                send_photo(screenshot_path)
             except Exception as e:
                 print(f"[scraper] send_photo error: {e}")
             finally:
@@ -134,10 +126,10 @@ async def main():
                     print(f"[scraper] Deleted temp screenshot for {author}")
                 except Exception:
                     pass
-        else:
-            # No screenshot — fall back to text message
-            result = send_message(card_text, reply_markup=keyboard)
-            message_id = result.get("result", {}).get("message_id")
+
+        # Text card with Approve/Skip buttons — message_id saved for later edits
+        result     = send_message(card_text, reply_markup=keyboard)
+        message_id = result.get("result", {}).get("message_id")
 
         # Save message_id so bot.py / poster_job.py can edit the card later
         if message_id:
