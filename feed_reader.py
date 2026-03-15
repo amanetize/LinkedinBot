@@ -1,12 +1,15 @@
 """
 feed_reader.py — Async LinkedIn Feed Scanner
 
-Extracts: url, text, author_name, author_title, connection_level,
-          likes_count, comments_count, raw_text.
-Cookies loaded from MongoDB. Saved back after every session.
+All post data (author, title, connection level, counts, post text, post url)
+is extracted by a single Groq vision+text call per post — no DOM churning.
+
+Each qualifying post gets a temp screenshot sent to Telegram, then deleted.
+Cookies loaded from / saved back to MongoDB.
 """
 
-import os, json, asyncio, random, re
+import os, json, asyncio, random, base64, tempfile
+from pathlib import Path
 from playwright.async_api import async_playwright
 from dotenv import load_dotenv
 
@@ -17,9 +20,11 @@ except ImportError:
 
 load_dotenv()
 
-SCREENSHOTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_screenshots")
-os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+SCREENSHOTS_DIR = Path(__file__).parent / "debug_screenshots"
+SCREENSHOTS_DIR.mkdir(exist_ok=True)
 
+
+# ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _load_cookies_from_db() -> list:
     try:
@@ -37,98 +42,103 @@ def _save_cookies_to_db(cookies: list):
         print(f"[feed] DB cookie save error: {e}")
 
 
-def _clean_post_text(raw_text: str, author_name: str = "", author_title: str = "") -> str:
-    if not raw_text or len(raw_text) < 20:
-        return raw_text
+# ── AI extraction ─────────────────────────────────────────────────────────────
 
-    text = " ".join(raw_text.strip().split())
+_EXTRACT_PROMPT = """You are given the raw innerText of a LinkedIn feed post card, plus a screenshot.
 
-    for phrase in ("Feed postSuggested", "Feed post", "Verified Profile", "Premium Profile"):
-        if text.lower().startswith(phrase.lower()):
-            text = text[len(phrase):].lstrip()
-        text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
+Extract ALL of the following fields. Return ONLY valid JSON, no extra text.
 
-    # Strip connection level prefix (1st, 2nd, 3rd)
-    text = re.sub(r"^(?:1st|2nd|3rd|\d+th)\s*", "", text, flags=re.IGNORECASE)
+{
+  "worth":            boolean   -- true if valuable for an aspiring Data Scientist / AI Engineer to engage with,
+  "reason":           string    -- 1-2 sentence explanation of why (or why not),
+  "author_name":      string    -- full name of the person who wrote the post,
+  "author_title":     string    -- job title / headline of the author,
+  "connection_level": string    -- "1st", "2nd", "3rd", or "" if not shown,
+  "likes_count":      integer   -- number of reactions/likes (0 if not shown),
+  "comments_count":   integer   -- number of comments (0 if not shown),
+  "post_text":        string    -- clean body text of the post only (strip author name, title,
+                                   timestamps, "Follow", reaction counts, and LinkedIn chrome),
+  "post_url":         string    -- the full URL of the post if visible anywhere in the text
+                                   (look for linkedin.com/posts/ or linkedin.com/feed/update/);
+                                   return "" if not found
+}
 
-    # Strip author title if it appears at start
-    if author_title and len(author_title) > 5:
-        text = re.sub(rf"^{re.escape(author_title)}\s*(?:[|,·•\-])?\s*", "", text, flags=re.IGNORECASE)
+Raw post text:
+"""
 
-    # Strip author name if at start
-    if author_name:
-        safe = re.escape(author_name)
-        for pat in [
-            rf"^{safe}\s*(?:[,·•\-])\s*",
-            rf"^{safe}\s+",
-            rf"^(?:1st|2nd|3rd|\d+th)\s*{safe}\s*(?:[,·•\-])?\s*",
-        ]:
-            text = re.sub(pat, "", text, flags=re.IGNORECASE)
-
-    # Strip "Name • Title" prefix
-    if author_name and author_title:
-        m = re.match(rf"^{re.escape(author_name)}\s*[•·]\s*{re.escape(author_title)}", text, flags=re.IGNORECASE)
-        if m:
-            text = text[m.end():].lstrip()
-
-    # Strip timestamp/follow chrome: "1d • Follow", "2d • Edited • Follow"
-    text = re.sub(r"^\d+[dhm]\s*(?:•\s*(?:Edited\s*•\s*)?Follow\s*)?", "", text, flags=re.IGNORECASE)
-
-    text = " ".join(text.split())
-    return text.strip() if len(text) > 20 else raw_text
+_EVAL_MODEL   = "llama-3.1-8b-instant"
+_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 
-def _extract_connection_level(raw_text: str) -> str:
-    """Parse 1st / 2nd / 3rd from raw post text."""
-    m = re.search(r"\b(1st|2nd|3rd)\b", raw_text[:200])
-    return m.group(1) if m else ""
+async def _ai_extract_post(client: Groq, raw_text: str, screenshot_b64) -> dict:
+    prompt = _EXTRACT_PROMPT + raw_text[:4000]
 
+    # Try vision model first if we have a screenshot
+    if screenshot_b64:
+        try:
+            resp = client.chat.completions.create(
+                model=_VISION_MODEL,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=800,
+            )
+            return json.loads(resp.choices[0].message.content)
+        except Exception as e:
+            print(f"[feed] Vision model error, falling back to text-only: {e}")
 
-async def _extract_counts(page, post_element) -> dict:
-    """Extract likes and comments counts from the post DOM element."""
+    # Text-only fallback
     try:
-        counts = await post_element.evaluate("""el => {
-            let likes = 0, comments = 0;
-
-            // Likes / reactions: look for social counts button
-            let likeEl = el.querySelector(
-                'button[aria-label*="reaction"] span, ' +
-                'span[data-test-id*="social-action-counts-reaction"] span, ' +
-                'button.social-counts-reactions span.social-counts-reactions__count'
-            );
-            if (!likeEl) {
-                // Fallback: any element whose text is just a number near "reaction"
-                let spans = el.querySelectorAll('span');
-                for (let s of spans) {
-                    let txt = (s.textContent || '').trim();
-                    let label = (s.getAttribute('aria-label') || '').toLowerCase();
-                    if (label.includes('reaction') && /^[\\d,]+$/.test(txt.replace(/,/g,''))) {
-                        likeEl = s; break;
-                    }
-                }
-            }
-            if (likeEl) {
-                let n = parseInt((likeEl.textContent || '').replace(/[^0-9]/g, ''));
-                if (!isNaN(n)) likes = n;
-            }
-
-            // Comments count
-            let commentBtns = el.querySelectorAll('button');
-            for (let btn of commentBtns) {
-                let label = (btn.getAttribute('aria-label') || '').toLowerCase();
-                let txt   = (btn.textContent || '').trim();
-                if (label.includes('comment') || txt.toLowerCase().includes('comment')) {
-                    let m = txt.match(/([0-9,]+)/);
-                    if (m) { comments = parseInt(m[1].replace(/,/g,'')); break; }
-                }
-            }
-            return {likes, comments};
-        }""")
-        return counts
+        resp = client.chat.completions.create(
+            model=_EVAL_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            max_tokens=800,
+        )
+        return json.loads(resp.choices[0].message.content)
     except Exception as e:
-        print(f"[feed] count extraction error: {e}")
-        return {"likes": 0, "comments": 0}
+        print(f"[feed] Text-only extraction error: {e}")
+        return {}
 
+
+async def _screenshot_element(post_element):
+    """
+    Screenshot just the post element.
+    Returns (base64_string, temp_file_path).
+    Caller must delete the temp file after use.
+    """
+    try:
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        await post_element.screenshot(path=tmp_path)
+        with open(tmp_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        return b64, tmp_path
+    except Exception as e:
+        print(f"[feed] Screenshot error: {e}")
+        return None, None
+
+
+def _cleanup_temp(path):
+    if path:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+# ── LinkedIn login ────────────────────────────────────────────────────────────
 
 async def _async_login(context, page):
     email    = os.environ.get("LI_EMAIL")
@@ -140,13 +150,9 @@ async def _async_login(context, page):
     await page.goto("https://www.linkedin.com/login", wait_until="networkidle")
     await asyncio.sleep(random.uniform(3, 5))
 
-    username = page.locator("#username")
-    if await username.is_visible(timeout=5000):
-        await username.fill(email)
-        await asyncio.sleep(random.uniform(0.4, 1.0))
-        await page.locator("#password").fill(password)
-        await asyncio.sleep(random.uniform(0.4, 0.9))
-        await page.locator("button[type='submit']").click()
+    username_loc = page.locator("#username")
+    if await username_loc.is_visible(timeout=5000):
+        await username_loc.fill(email)
     else:
         try:
             await page.click("text=Sign in using another account", timeout=5000)
@@ -154,16 +160,17 @@ async def _async_login(context, page):
             pass
         await page.wait_for_selector("#username", state="visible", timeout=15000)
         await page.locator("#username").fill(email)
-        await asyncio.sleep(random.uniform(0.4, 1.0))
-        await page.locator("#password").fill(password)
-        await asyncio.sleep(random.uniform(0.4, 0.9))
-        await page.locator("button[type='submit']").click()
+
+    await asyncio.sleep(random.uniform(0.4, 1.0))
+    await page.locator("#password").fill(password)
+    await asyncio.sleep(random.uniform(0.4, 0.9))
+    await page.locator("button[type='submit']").click()
 
     await page.wait_for_load_state("load")
     await asyncio.sleep(random.uniform(4, 6))
 
     if "/login" in page.url or "/authwall" in page.url or "/checkpoint" in page.url:
-        await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, "login_failed.png"))
+        await page.screenshot(path=str(SCREENSHOTS_DIR / "login_failed.png"))
         raise RuntimeError(f"LinkedIn login failed — stuck at {page.url}")
 
     cookies = await context.cookies()
@@ -171,7 +178,10 @@ async def _async_login(context, page):
     print(f"[feed] ✓ Login successful, saved {len(cookies)} cookies.")
 
 
-async def _extract_post_url(page, post_element):
+# ── URL extraction fallback ───────────────────────────────────────────────────
+
+async def _extract_post_url_via_menu(page, post_element) -> str:
+    """Open the post control menu, click 'Copy link to post', read URL from toast."""
     try:
         menu_btn = post_element.locator('button[aria-label*="control menu"]')
         if await menu_btn.count() == 0:
@@ -187,9 +197,8 @@ async def _extract_post_url(page, post_element):
         await copy_item.first.click()
         await asyncio.sleep(1.5)
 
-        toast_links = await page.evaluate("""() => {
-            let alerts = document.querySelectorAll('[role="alert"] a');
-            for (let a of alerts) {
+        toast_url = await page.evaluate("""() => {
+            for (let a of document.querySelectorAll('[role="alert"] a')) {
                 if (a.textContent.trim().toLowerCase().includes('view post')) return a.href;
             }
             return '';
@@ -198,13 +207,13 @@ async def _extract_post_url(page, post_element):
         await page.keyboard.press("Escape")
         await asyncio.sleep(0.5)
 
-        if toast_links:
-            base = toast_links.split("?")[0]
+        if toast_url:
+            base = toast_url.split("?")[0]
             return base + "/" if not base.endswith("/") else base
         return ""
 
     except Exception as e:
-        print(f"[feed] URL extraction error: {e}")
+        print(f"[feed] URL menu extraction error: {e}")
         try:
             await page.keyboard.press("Escape")
         except Exception:
@@ -212,7 +221,15 @@ async def _extract_post_url(page, post_element):
         return ""
 
 
-async def get_feed_posts(callback_func, max_targets=10):
+# ── Main feed scanner ─────────────────────────────────────────────────────────
+
+async def get_feed_posts(callback_func, max_targets: int = 10):
+    """
+    Scan the LinkedIn feed. For each post deemed worth engaging:
+      - AI extracts all fields from innerText + screenshot in one call
+      - data['screenshot_path'] is a temp PNG file path
+      - caller (scraper_job.py) must send the photo then delete the file
+    """
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError("GROQ_API_KEY not set.")
@@ -251,11 +268,10 @@ async def get_feed_posts(callback_func, max_targets=10):
                 if "/login" in page.url or "/authwall" in page.url:
                     raise RuntimeError("Feed still redirecting after login.")
 
-            await page.screenshot(path=os.path.join(SCREENSHOTS_DIR, "feed_loaded.png"))
-
+            await page.screenshot(path=str(SCREENSHOTS_DIR / "feed_loaded.png"))
             fresh_cookies = await context.cookies()
             _save_cookies_to_db(fresh_cookies)
-            print(f"[feed] ✓ Feed loaded. Cookies saved ({len(fresh_cookies)}). Starting scan...")
+            print(f"[feed] ✓ Feed loaded. Saved {len(fresh_cookies)} cookies. Scanning...")
 
             found_count    = 0
             processed_keys = set()
@@ -272,86 +288,75 @@ async def get_feed_posts(callback_func, max_targets=10):
                     await asyncio.sleep(random.uniform(3, 5))
                     continue
 
-                new_posts_found = False
+                new_this_round = False
+
                 for idx in range(count):
                     if found_count >= max_targets:
                         break
 
                     post     = posts.nth(idx)
                     comp_key = await post.get_attribute("componentkey")
-
                     if comp_key in processed_keys:
                         continue
                     processed_keys.add(comp_key)
-                    new_posts_found = True
+                    new_this_round = True
 
-                    raw_text = await post.evaluate("el => el.textContent")
+                    raw_text = await post.evaluate("el => el.innerText")
                     raw_text = " ".join(raw_text.split())
 
                     if len(raw_text) < 50:
                         continue
 
-                    # ── AI Evaluation ──────────────────────────────────
-                    try:
-                        resp = client.chat.completions.create(
-                            model="llama-3.1-8b-instant",
-                            messages=[{
-                                "role": "user",
-                                "content": (
-                                    "Evaluate this LinkedIn post for networking value "
-                                    "for an aspiring Data Scientist / AI Engineer.\n"
-                                    "Return ONLY valid JSON with keys:\n"
-                                    '  "worth": boolean\n'
-                                    '  "reason": string — 1-2 sentence explanation\n'
-                                    '  "author_name": string\n'
-                                    '  "author_title": string\n\n'
-                                    f"Post text:\n{raw_text[:3000]}"
-                                ),
-                            }],
-                            response_format={"type": "json_object"},
-                            temperature=0.1,
-                        )
-                        eval_data = json.loads(resp.choices[0].message.content)
-                    except Exception as e:
-                        print(f"[feed] Groq evaluation error: {e}")
+                    # Screenshot the element (used by both AI and Telegram)
+                    screenshot_b64, screenshot_path = await _screenshot_element(post)
+
+                    # One AI call: evaluate + extract all fields
+                    data = await _ai_extract_post(client, raw_text, screenshot_b64)
+
+                    if not data:
+                        print(f"[feed] ⚠ AI extraction returned nothing for post #{idx}")
+                        _cleanup_temp(screenshot_path)
                         continue
 
-                    if not eval_data.get("worth"):
-                        print(f"[feed] ⏭ Skipped: {eval_data.get('author_name','?')} — {eval_data.get('reason','')[:60]}")
+                    if not data.get("worth"):
+                        print(f"[feed] ⏭ Skipped: {data.get('author_name','?')} — {data.get('reason','')[:70]}")
+                        _cleanup_temp(screenshot_path)
                         continue
 
-                    post_url = await _extract_post_url(page, post)
+                    # Prefer AI-extracted URL; fall back to menu extraction
+                    post_url = (data.get("post_url") or "").strip()
+                    if not post_url or "linkedin.com" not in post_url:
+                        post_url = await _extract_post_url_via_menu(page, post)
+
                     if not post_url:
-                        print("[feed] ⚠ Could not extract URL, skipping.")
+                        print("[feed] ⚠ Could not get post URL, skipping.")
+                        _cleanup_temp(screenshot_path)
                         continue
 
-                    # ── Extract extra metadata ─────────────────────────
-                    connection_level = _extract_connection_level(raw_text)
-                    counts           = await _extract_counts(page, post)
+                    found_count += 1
+                    author = data.get("author_name", "Unknown")
+                    conn   = data.get("connection_level", "")
+                    likes  = int(data.get("likes_count") or 0)
+                    cmts   = int(data.get("comments_count") or 0)
 
-                    found_count  += 1
-                    author        = eval_data.get("author_name", "Unknown")
-                    author_title  = eval_data.get("author_title", "")
-                    display_text  = _clean_post_text(raw_text, author, author_title)
-                    post_text     = display_text if len(display_text) > 50 else raw_text
-
-                    print(f"[feed] 🎯 Target #{found_count}: {author} ({connection_level}) — {counts['likes']}❤️ {counts['comments']}💬")
+                    print(f"[feed] 🎯 Target #{found_count}: {author} ({conn}) — {likes}❤️ {cmts}💬")
 
                     await callback_func({
                         "url":              post_url,
-                        "text":             post_text,
+                        "text":             (data.get("post_text") or raw_text)[:1500],
                         "raw_text":         raw_text,
                         "author_name":      author,
-                        "author_title":     author_title,
-                        "connection_level": connection_level,
-                        "likes_count":      counts["likes"],
-                        "comments_count":   counts["comments"],
-                        "reason":           eval_data.get("reason", ""),
+                        "author_title":     data.get("author_title", ""),
+                        "connection_level": conn,
+                        "likes_count":      likes,
+                        "comments_count":   cmts,
+                        "reason":           data.get("reason", ""),
+                        "screenshot_path":  screenshot_path,  # temp file; caller must delete
                     })
 
                     await asyncio.sleep(random.uniform(1.5, 3))
 
-                if not new_posts_found or rnd % 2 == 0:
+                if not new_this_round or rnd % 2 == 0:
                     await page.mouse.wheel(0, random.randint(2000, 4000))
                     await asyncio.sleep(random.uniform(3, 5))
 

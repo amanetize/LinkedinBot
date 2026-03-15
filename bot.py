@@ -524,7 +524,7 @@ async def post_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     news_id  = str(uuid.uuid4())[:8]
     tele_msg = f"📰 Draft LinkedIn Post:\n\n{content}"
     try:
-        log_id = log_news_created(search_ctx, content, "fetch", tele_msg, news_id)
+        log_id = log_news_created(search_ctx, content, "fetch", news_id)
     except Exception as e:
         log_id = None
         print(f"[bot] log error: {e}")
@@ -588,7 +588,7 @@ async def _fetch_news(bot, message_id: int):
     news_id  = str(uuid.uuid4())[:8]
     tele_msg = f"📰 Draft LinkedIn Post:\n\n{content}"
     try:
-        log_id = log_news_created(search_ctx, content, "fetch", tele_msg, news_id)
+        log_id = log_news_created(search_ctx, content, "fetch", news_id)
     except Exception as e:
         log_id = None
         print(f"[bot] log error: {e}")
