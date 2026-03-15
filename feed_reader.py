@@ -67,7 +67,7 @@ Raw post text:
 """
 
 _EVAL_MODEL   = "openai/gpt-oss-20b"       # fast structured extraction fallback
-_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"  # unchanged
+_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 
 async def _ai_extract_post(client: Groq, raw_text: str, screenshot_b64) -> dict:
