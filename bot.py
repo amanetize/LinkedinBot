@@ -43,12 +43,6 @@ class _HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
     def log_message(self, *args): pass
 
-def _start_health_server():
-    port = int(os.environ.get("PORT", 8000))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
-    print(f"[health] Listening on port {port}")
-    server.serve_forever()
-
 
 # ── GitHub Actions triggers ───────────────────────────────────────────────────
 def _gh_dispatch(event_type: str, payload: dict) -> bool:
@@ -630,8 +624,13 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Start health server FIRST so Render's port scanner succeeds immediately.
+    # The server binds synchronously before any Telegram network calls happen.
     if os.environ.get("PORT"):
-        threading.Thread(target=_start_health_server, daemon=True).start()
+        port = int(os.environ["PORT"])
+        health_server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+        print(f"[health] Bound to port {port}")
+        threading.Thread(target=health_server.serve_forever, daemon=True).start()
 
     app = ApplicationBuilder().token(os.environ["TELEGRAM_TOKEN"]).build()
     app.add_handler(CommandHandler("start_cron", start_cron))
