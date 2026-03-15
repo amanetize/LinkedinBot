@@ -66,8 +66,8 @@ Extract ALL of the following fields. Return ONLY valid JSON, no extra text.
 Raw post text:
 """
 
-_EVAL_MODEL   = "llama-3.1-8b-instant"
-_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+_EVAL_MODEL   = "llama-3.3-70b-versatile"
+_VISION_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"
 
 
 async def _ai_extract_post(client: Groq, raw_text: str, screenshot_b64) -> dict:
