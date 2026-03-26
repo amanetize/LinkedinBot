@@ -4,14 +4,14 @@ Automated LinkedIn engagement bot controlled via Telegram. Scan qualified posts,
 
 ## Features
 
-✨ **Smart Target Scanning** — AI evaluates LinkedIn posts and sends high-value targets to Telegram with interactive review cards
-✨ **AI Comment Drafting** — Context-aware comment generation using latest AI (Llama 3.1)
-✨ **Comment Customization** — Regenerate, write custom comment, or rephrase with your instruction
-✨ **News Generation** — Top-5 AI news weekly with Tavily search + AI drafting
-✨ **Activity Logging** — Full audit trail: every scrape, draft, action stored in MongoDB
-✨ **Koyeb deployment** — long-lived Telegram bot on Koyeb with scan + posting
-✨ **GitHub Actions** — scheduled Playwright script runs for targeted tasks
-✨ **MongoDB storage** — shared state and audit logs
+✨ **Smart Target Scanning** — AI evaluates LinkedIn posts and sends high-value targets to Telegram with interactive review cards <br>
+✨ **AI Comment Drafting** — Context-aware comment generation using latest AI (Llama 3.1) <br>
+✨ **Comment Customization** — Regenerate, write custom comment, or rephrase with your instruction<br>
+✨ **News Generation** — Top-5 AI news weekly with Tavily search + AI drafting<br>
+✨ **Activity Logging** — Full audit trail: every scrape, draft, action stored in MongoDB<br>
+✨ **Koyeb deployment** — long-lived Telegram bot on Koyeb with scan + posting<br>
+✨ **GitHub Actions** — scheduled Playwright script runs for targeted tasks<br>
+✨ **MongoDB storage** — shared state and audit logs<br>
 ✨ **UptimeRobot** — keeps Koyeb bot alive with periodic pings
 
 ## Quick Start
